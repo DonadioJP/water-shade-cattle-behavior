@@ -1,0 +1,24 @@
+---
+title: "Nighttime Behavior"
+subtitle: "Compensatory grazing and nocturnal rest patterns"
+---
+
+## Overview
+
+*[To be written — central question: do restricted animals compensate at night?]*
+
+## Grazing
+
+*[Analysis and plot — nocturnal grazing by treatment]*
+
+## Ruminating
+
+*[Analysis and plot — nocturnal rumination — lying rumination dominant behavior]*
+
+## Idling and Lying
+
+*[Analysis and plot — rest patterns at night by treatment]*
+
+## Breed Differences
+
+*[Analysis and plot — Braford vs Jersey nighttime behavior]*

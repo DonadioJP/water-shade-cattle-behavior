@@ -1,0 +1,54 @@
+project:
+  type: website
+  output-dir: docs
+
+website:
+  title: "Water & Shade — Cattle Welfare Study"
+  favicon: assets/favicon.ico
+  navbar:
+    left:
+      - href: index.qmd
+        text: Home
+      - href: methods.qmd
+        text: Methods
+      - text: Results
+        menu:
+          - href: results-daytime.qmd
+            text: Daytime Behavior
+          - href: results-nighttime.qmd
+            text: Nighttime Behavior
+          - href: results-drinking.qmd
+            text: Drinking Behavior
+          - href: results-thermal.qmd
+            text: Thermal Comfort
+          - href: results-thermography.qmd
+            text: Thermography
+      - href: findings.qmd
+        text: Key Findings
+      - href: about.qmd
+        text: About
+    right:
+      - icon: github
+        href: https://github.com/jpdonadio/water-shade-cattle-behavior
+  page-footer:
+    left: "Pretto, Donadio & Pinheiro Machado Filho — LETA/UFSC"
+    right: "Built with [Quarto](https://quarto.org)"
+
+format:
+  html:
+    theme:
+      - cosmo
+      - custom.scss
+    toc: true
+    toc-depth: 3
+    code-fold: true
+    code-tools: true
+    fig-align: center
+    fig-width: 9
+    fig-height: 5.5
+
+execute:
+  echo: false
+  warning: false
+  message: false
+  cache: true

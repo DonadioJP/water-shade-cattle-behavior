@@ -1,0 +1,32 @@
+---
+title: "Thermography"
+subtitle: "Body surface temperatures by treatment, breed, coat color, and social rank"
+---
+
+## Overview
+
+*[To be written — thermography as non-invasive welfare indicator]*
+
+## Body Temperature by Treatment
+
+*[Analysis and plot — flank, eye, udder temperatures across S+W+, S+W-, S-W+, S-W-]*
+
+## Body Part Comparison
+
+*[Analysis and plot — temperature differences across anatomical regions]*
+
+## Coat Color Effects
+
+*[Analysis and plot — Amarela vs Preta vs Vermelha flank temperatures]*
+
+## Breed Effects
+
+*[Analysis and plot — Braford vs Jersey body surface temperatures]*
+
+## Social Rank Effects
+
+*[Analysis and plot — Dominant vs Intermediate vs Subordinate temperatures by treatment]*
+
+## Time of Day Effects
+
+*[Analysis and plot — temperature progression at 10:00, 13:00, 16:00h]*
