@@ -33,7 +33,7 @@ What is less understood is **how the combination of shade and water availability
 
 This experiment set out to answer that directly.
 
----
+------------------------------------------------------------------------
 
 ## The experiment
 
@@ -62,7 +62,7 @@ Thirty-two cows — half Braford, half Jersey — were assigned to four treatmen
 
 Behavioral scans were recorded every 10 minutes across full 24-hour cycles. Thermographic images captured body surface temperatures at three time points daily. Black globe thermometers, soil surface measurements, and meteorological station data characterized the thermal environment continuously.
 
----
+------------------------------------------------------------------------
 
 ## What we measured
 
@@ -101,7 +101,7 @@ Behavioral scans were recorded every 10 minutes across full 24-hour cycles. Ther
 </div>
 ```
 
----
+------------------------------------------------------------------------
 
 ## Study context
 
@@ -109,6 +109,6 @@ This research was conducted under the **Voisin Rational Grazing** system, which 
 
 The experiment ran from **December 2021 to April 2022** — the hottest and most humid months of the year in Florianópolis — ensuring ecologically relevant thermal stress conditions throughout.
 
-::: {.callout-note}
+::: callout-note
 This website accompanies a manuscript currently in preparation for submission to *Applied Animal Behaviour Science*. Data, analysis scripts, and the full methods are available in the [GitHub repository](https://github.com/jpdonadio/water-shade-cattle-behavior).
 :::

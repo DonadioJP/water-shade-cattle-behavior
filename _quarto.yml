@@ -9,21 +9,21 @@ website:
     left:
       - href: index.qmd
         text: Home
-      - href: methods.qmd
+      - href: pages/methods.qmd
         text: Methods
       - text: Results
         menu:
-          - href: results-daytime.qmd
+          - href: pages/results-daytime.qmd
             text: Daytime Behavior
-          - href: results-nighttime.qmd
+          - href: pages/results-nighttime.qmd
             text: Nighttime Behavior
-          - href: results-drinking.qmd
+          - href: pages/results-drinking.qmd
             text: Drinking Behavior
-          - href: results-thermal.qmd
+          - href: pages/results-thermal.qmd
             text: Thermal Comfort
-          - href: results-thermography.qmd
+          - href: pages/results-thermography.qmd
             text: Thermography
-      - href: findings.qmd
+      - href: pages/findings.qmd
         text: Key Findings
       - href: about.qmd
         text: About
@@ -31,7 +31,7 @@ website:
       - icon: github
         href: https://github.com/jpdonadio/water-shade-cattle-behavior
   page-footer:
-    left: "Pretto, Donadio & Pinheiro Machado Filho — LETA/UFSC"
+    left: "Pretto et al. - LETA/UFSC"
     right: "Built with [Quarto](https://quarto.org)"
 
 format:
