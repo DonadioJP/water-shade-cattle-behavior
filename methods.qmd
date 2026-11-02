@@ -1,0 +1,123 @@
+---
+title: "Methods"
+subtitle: "Study design, data collection, and statistical analysis"
+---
+
+## 1 · Study Site and Animals
+
+The study was conducted at the Bovine Vivarium of the Ressacada Experimental Farm (FER), Federal University of Santa Catarina (UFSC), Florianópolis, Brazil (27°40′25″ S; 48°32′30″ W), from December 2021 to April 2022. Animal procedures were approved by the UFSC Ethics Committee on Animal Use (CEUA Protocol 857122042).
+
+Thirty-two females of Braford (478 ± 44 kg) and Jersey (385 ± 33 kg) breeds were used. Animals were individually identified with ear tags and numbered on both flanks with non-toxic paint. The experimental area covered 3.2 ha divided into twelve paddocks of 2,600 m² each.
+
+---
+
+## 2 · Experimental Design
+
+The experiment followed a 4 × 4 Latin square design over four 5-day periods (two adaptation days, one rest day, two data collection days), repeated at 30-day intervals. Eight animals (four Braford, four Jersey) were assigned to each of four groups, rotating across treatments each period.
+
+| Treatment | Code | Description |
+|-----------|:----:|-------------|
+| Shade + *ad libitum* water | **S+W+** | Paddock with shade, pasture, mineral supplement, and water available 24h |
+| Shade + restricted water   | **S+W−** | Shade and pasture *ad libitum*; water available 1h/day (12:00–12:30 and 17:30–18:00) |
+| No shade + *ad libitum* water | **S−W+** | Open paddock with pasture, mineral supplement, and water available 24h |
+| No shade + restricted water   | **S−W−** | Open paddock; water available 1h/day (12:00–12:30 and 17:30–18:00) |
+
+Paddocks were managed under the Voisin Rational Grazing system and subdivided with temporary fencing (1,300 m² per subdivision; 162 m²/animal). Animals were moved daily at 06:50h. Shaded subdivisions provided 390 m² of tree canopy per subdivision (48.7 m²/animal). Six paddocks were shaded by *Inga edulis* trees planted in rows (3 m between plants; 20 m between rows).
+
+For restricted water treatments, animals were led through a 5 m-wide corridor to troughs located 100 m from the paddocks at the designated times, reflecting practices common on farms without in-paddock water.
+
+---
+
+## 3 · Behavioral Observations
+
+Behavioral assessments ran continuously from 07:00 on one day to 07:00 the following day (48h per period). Scan sampling was performed instantaneously every 10 minutes across all four groups simultaneously, yielding 24 scans per hour. Scan 1 = 07:00h; Scan 12 = 18:00h (daytime); Scan 13 = 19:00h; Scan 24 = 06:00h (nighttime). Observers were trained and passed two reliability tests reaching ≥95% agreement before data collection.
+
+Behaviors recorded followed the ethogram of the Laboratory of Applied Ethology (LETA/UFSC):
+
+| Behavior | Definition |
+|----------|------------|
+| Grazing | Head lowered to pasture height, apprehending forage, stationary or moving |
+| Ruminating | Lateral mandibular chewing, lying or standing, head at or above body level |
+| Idle standing | Standing or lying without body movement |
+| Lying idle | Lying without body movement |
+| Lying ruminating | Ruminating while lying |
+| Drinking | Lips submerged in water with swallowing movements |
+| Other | Any behavior not described above |
+
+For analysis, behaviors were grouped as:
+
+- **Grazing** = grazing only
+- **Other** = other behaviors (analysed separately; no longer added to grazing)
+- **Lying** = lying idle + lying ruminating
+- **Standing** = idle standing + standing ruminating
+- **Ruminating** = ruminating in any posture (standing + lying)
+
+---
+
+## 4 · Drinking Behavior and Water Intake
+
+**Drinking events** were recorded at each trough visit: animal identity, start and end time, number of sips, and drinking duration (s). Sip rate (sips/s) was derived as sips ÷ duration. Surveillance cameras (Intelbras®) were installed at each trough and recorded continuously during observation days to capture nighttime visits without observer presence. Time spent with head raised mid-bout was discounted from drinking duration.
+
+**Daily water intake** was measured using water meters (Unimag®, precision 0.01 L) installed at the inlet of each trough, recorded at 07:00 and 19:00h. Consumption volumes were corrected for daily precipitation and evaporation relative to trough surface area. All troughs were supplied from the same source, controlled by a float valve. Daily group intake was divided by 8 to estimate per-animal consumption.
+
+---
+
+## 5 · Thermal Comfort
+
+Climatic variables (air temperature, relative humidity, wind speed, precipitation) were collected at the FER–UFSC Meteorological Station (ID 1036), 300 m from the experimental area.
+
+**Black globe temperature** was recorded every 5 minutes from 08:00 to 18:00h using Data Loggers (Elitech® RC-4HC) installed at 1 m height in shaded and unshaded paddocks.
+
+**Wet-Bulb Globe Temperature (WBGT)** was calculated hourly as a composite thermal stress index for cattle. Thresholds follow Baeta & Souza (2010): ≤ 74 comfort; > 74–78 alert; > 78–84 danger; > 84 critical.
+
+**Thermal Radiation Load (TLR)** was derived from the Stefan-Boltzmann equation applied to mean radiant temperature (W/m²).
+
+**Soil surface temperature** was measured hourly from 09:00 to 18:00h using an infrared thermometer (Simpla® TI-55; range −55 to 550°C; precision ±1°C) at three location types: full sun, sun between trees, and under tree canopy (shade). Measurements in shaded paddocks were taken at four shaded and four unshaded points; in unshaded paddocks at four random points. All readings were taken by the same person following a standardized protocol.
+
+---
+
+## 6 · Thermography
+
+Non-invasive body surface temperature was assessed for 16 cows (four per group: two Braford, two Jersey). Thermographic images were captured at 3 m distance at 10:00, 13:00, and 16:00h on collection days using an infrared camera (Flir® T640; emissivity = 0.98). Four anatomical regions were assessed: right flank, left flank, eye, and udder.
+
+Images were analyzed in Flir Thermal Studio® to extract minimum, mean, and maximum temperatures per region. Body surface temperature was calculated as (mean + maximum) / 2 following Montanholi et al. (2008); minimum values were excluded due to greater environmental influence. For flank analyses, right and left flank values were averaged per animal, day and capture time.
+
+---
+
+## 7 · Statistical Analysis
+
+All analyses were performed in R (R Core Team, 2023) using `lme4`, `lmerTest`, and `emmeans`. Code is available via the **Code** buttons on each results page.
+
+### Experimental unit and random structure
+
+The design is a 4 × 4 Latin square (4 groups of 8 cows × 4 periods, 2 collection days per period). The experimental unit is **group × period** (16 units), not the animal-hour, so every animal-level model includes a group × period random effect in addition to group, animal and day/hour. Period is a fixed effect and group is random:
+
+$$
+Y = \text{treatment} + \text{period} + (1 \mid \text{group}) + (1 \mid \text{group:period}) + (1 \mid \text{animal\_id}) + (1 \mid \text{day} / \text{hour}) + \varepsilon
+$$
+
+Models that did not converge or were singular were refitted with the `bobyqa` optimizer; random terms whose variance was estimated as zero were then dropped (never group × period). Each results page lists the models affected.
+
+### Linear mixed models (LMM)
+
+Continuous outcomes were analyzed with `lmer()` (lmerTest), with Satterthwaite degrees of freedom for all tests and EMMs. Behavioral outcomes (scans/h of grazing, other, lying, standing and ruminating) were modelled separately for daytime and nighttime. Drinking duration was modelled on the log scale and is reported as back-transformed geometric means. Water intake is a group-day measure (group intake ÷ 8) and was modelled with group and group × period as random effects (day within group × period is the residual). Thermography models used flank temperature averaged over the right and left flank, with treatment and capture time in the same model, and `(1 | group) + (1 | group:period) + (1 | animal_id) + (1 | day)`.
+
+### Generalized linear mixed models (GLMM)
+
+Daily drinking events per animal were counted on the complete animal × day grid (animal-days without drinking entered as 0) and modelled with a Poisson GLMM (`glmer()`). The Pearson dispersion ratio was checked; when it was clearly below 1, a generalized Poisson GLMM (`glmmTMB`, `genpois`) was fitted as a sensitivity check. Sips per drinking event were modelled with a Poisson GLMM, switching to a negative binomial GLMM (`glmmTMB`, `nbinom2`) when overdispersed. Back-transformed rates and rate ratios are reported.
+
+### Factorial models
+
+The four treatments form a 2 × 2 factorial. Each outcome (except shade use) was also modelled as `shade * water + period` with the same random structure, and shade, water and shade × water were tested with `emmeans::joint_tests()`. Where the interaction had *p* < 0.10, simple effects (shade within water, water within shade) are reported.
+
+### Experimental-unit sensitivity analysis
+
+As a check on the mixed models, every behavior, drinking and intake outcome was averaged to one value per group × period (16 values) and analysed as a classic Latin square with `lm()`: `y ~ treatment + period + group` and `y ~ shade * water + period + group` (6 error df). Coat color and breed, which vary only between animals, were tested in mixed models that keep the animal random effect and also on one mean per animal (n = 16).
+
+### Estimated marginal means and comparisons
+
+Estimated marginal means (EMMs) and pairwise contrasts were obtained using the `emmeans` package with Tukey adjustment for multiple comparisons. Model-based results are reported as EMM ± SE; descriptive tables report raw mean ± SD. Significance is indicated as: \*\*\* *p* < 0.001; \*\* *p* < 0.01; \* *p* < 0.05; . *p* < 0.1; ns *p* ≥ 0.1. Residual diagnostics (residuals vs fitted and QQ plots for LMMs; DHARMa simulated residuals for GLMMs) are shown in collapsible sections on each results page.
+
+### Shade use
+
+Proportion of daytime scans recorded in shade was modeled as a continuous outcome using LMM, restricted to S+ treatments (S+W+ and S+W−). The 12:00h and 17:00h scan blocks, when W− animals were taken to the trough corridor (12:00h and 17:30–18:00h), were excluded for **both** S+ treatments.

@@ -1,0 +1,2788 @@
+---
+title: "Behavior"
+subtitle: "Activity patterns, drinking behavior, and shade use under shade and water access treatments"
+---
+
+```{r setup}
+#| include: false
+#| cache: false   # options (emm_options) and packages must be set on every render
+
+library(tidyverse)
+library(lme4)
+library(lmerTest)
+library(emmeans)
+library(ggplot2)
+library(plotly)
+library(rstatix)
+library(knitr)
+library(kableExtra)
+library(readxl)
+library(patchwork)
+library(multcomp)
+library(glmmTMB)
+library(DHARMa)
+
+select <- dplyr::select
+
+# ── Denominator df for emmeans on LMMs ────────────────────────────────────────
+# The experimental unit is group × period (16 units), so tests must use
+# Satterthwaite df rather than asymptotic z (emmeans' default once n > 3000).
+emm_options(lmer.df = "satterthwaite", lmerTest.limit = 1e5, pbkrtest.limit = 0)
+
+# ── Model fitting with convergence / singularity handling ─────────────────────
+# Fits the LMM (lmer) or, when `family` is given, the GLMM (glmer). On a
+# convergence warning or singular fit, refits with bobyqa; if still singular,
+# drops random terms with zero variance (never group:period) and records what
+# was done in `model_log`, together with the final random-effect variances.
+model_log <- tibble(model = character(), status = character(), action = character(),
+                    final = character())
+
+fit_mm <- function(formula, data, label, family = NULL) {
+  f_txt <- paste(deparse(formula, width.cutoff = 500), collapse = " ")
+  f_txt <- str_replace(f_txt, fixed("(1 | day/hour)"), "(1 | day) + (1 | day:hour)")
+  ctrl_bobyqa <- if (is.null(family)) lmerControl(optimizer = "bobyqa") else glmerControl(optimizer = "bobyqa")
+  fit <- function(f, ctrl = NULL) {
+    msgs <- character()
+    m <- withCallingHandlers(
+      if (is.null(family)) {
+        lmer(as.formula(f), data = data, control = ctrl %||% lmerControl())
+      } else {
+        glmer(as.formula(f), data = data, family = family, control = ctrl %||% glmerControl())
+      },
+      warning = function(w) { msgs <<- c(msgs, conditionMessage(w)); invokeRestart("muffleWarning") }
+    )
+    conv <- c(msgs, m@optinfo$conv$lme4$messages)
+    list(m = m, conv = conv[!str_detect(conv, "singular")])
+  }
+  res    <- fit(f_txt)
+  status <- c(if (length(res$conv)) "convergence warning", if (isSingular(res$m)) "singular")
+  action <- character()
+  if (length(status)) {
+    res    <- fit(f_txt, ctrl_bobyqa)
+    action <- "refit with bobyqa"
+    if (isSingular(res$m)) {
+      vc   <- as.data.frame(VarCorr(res$m))
+      zero <- setdiff(vc$grp[vc$vcov < 1e-8], c("Residual", "group:period"))
+      if (length(zero)) {
+        for (z in zero) f_txt <- str_remove(f_txt, fixed(paste0(" + (1 | ", z, ")")))
+        res    <- fit(f_txt, ctrl_bobyqa)
+        action <- c(action, paste0("dropped zero-variance term(s): ", paste(zero, collapse = ", ")))
+      }
+      if (isSingular(res$m)) action <- c(action, "group:period variance ≈ 0 (retained by design)")
+    }
+    if (length(res$conv)) action <- c(action, paste("still:", paste(unique(res$conv), collapse = " / ")))
+  }
+  vc_final <- as.data.frame(VarCorr(res$m))
+  model_log <<- bind_rows(model_log, tibble(
+    model  = label,
+    status = if (length(status)) paste(status, collapse = " + ") else "OK",
+    action = if (length(action)) paste(action, collapse = "; ") else "—",
+    final  = paste0(vc_final$grp, " = ", signif(vc_final$vcov, 3), collapse = "; ")
+  ))
+  res$m
+}
+
+# Records convergence of a glmmTMB fit (optimizer code + positive-definite Hessian)
+log_tmb <- function(m, label) {
+  ok <- m$fit$convergence == 0 && isTRUE(m$sdr$pdHess)
+  vc <- unlist(lapply(VarCorr(m)$cond, function(v) v[1]))
+  model_log <<- bind_rows(model_log, tibble(
+    model  = label,
+    status = if (ok) "OK" else "convergence problem",
+    action = "glmmTMB (nlminb)",
+    final  = paste0(names(vc), " = ", signif(vc, 3), collapse = "; ")
+  ))
+  invisible(m)
+}
+
+# ── Pearson dispersion ratio for count GLMMs ──────────────────────────────────
+overdisp_fun <- function(model) {
+  rdf <- df.residual(model)
+  rp  <- residuals(model, type = "pearson")
+  Pearson.chisq <- sum(rp^2)
+  prat <- Pearson.chisq / rdf
+  pval <- pchisq(Pearson.chisq, df = rdf, lower.tail = FALSE)
+  c(chisq = Pearson.chisq, ratio = prat, rdf = rdf, p = pval)
+}
+
+# ── p-value formatting for inline text ────────────────────────────────────────
+fmt_p <- function(p) ifelse(p < 0.001, "< 0.001", paste("=", formatC(p, format = "f", digits = 3)))
+
+# ── Color palette ─────────────────────────────────────────────────────────────
+pal_treatment <- c(
+  "S+W+" = "#2C4A2E",
+  "S+W-" = "#4A7FA5",
+  "S-W+" = "#C8A84B",
+  "S-W-" = "#6B4C35"
+)
+
+pal_shade <- c("S+" = "#2C4A2E", "S-" = "#C8A84B")
+pal_water <- c("W+" = "#4A7FA5", "W-" = "#6B4C35")
+
+pal_location <- c(
+  "shade"             = "#2C4A2E",
+  "sun_between_trees" = "#4A7FA5",
+  "sun"               = "#C8A84B"
+)
+
+# ── Clock time labels (scan 1 = 07:00 … scan 24 = 06:00) ─────────────────────
+scan_to_clock <- function(scan) {
+  hour_val <- (scan + 6) %% 24
+  sprintf("%02d:00", hour_val)
+}
+clock_labels <- setNames(scan_to_clock(1:24), 1:24)
+day_labels   <- clock_labels[1:12]
+night_labels <- clock_labels[13:24]
+
+# ── Convert scans/h to % of scans (6 scans per hour) ─────────────────────────
+scan_to_pct <- function(x) round(x / 6 * 100, 1)
+
+# ── Theme ─────────────────────────────────────────────────────────────────────
+theme_ws <- function(angle_x = 0) {
+  theme_classic(base_family = "sans", base_size = 12) +
+    theme(
+      plot.title         = element_text(face = "bold", color = "#2C4A2E", size = 13),
+      plot.subtitle      = element_text(color = "#6B6B6B", size = 11),
+      axis.title         = element_text(color = "#2A2A2A", size = 11),
+      axis.text          = element_text(color = "#2A2A2A"),
+      axis.text.x        = element_text(angle = angle_x,
+                                        hjust = if (angle_x > 0) 1 else 0.5),
+      legend.title       = element_text(face = "bold", size = 10),
+      legend.position    = "bottom",
+      panel.grid.major.y = element_line(color = "#DDD5C4", linewidth = 0.4),
+      strip.background   = element_rect(fill = "#F5F0E8", color = "#DDD5C4"),
+      strip.text         = element_text(face = "bold", color = "#2C4A2E")
+    )
+}
+
+# ── emmeans helper (LMM) ──────────────────────────────────────────────────────
+emm_table <- function(model, factor_name) {
+  emm  <- emmeans(model, as.formula(paste("~", factor_name)))
+  cont <- pairs(emm, adjust = "tukey")
+
+  emm_raw <- as.data.frame(emm)
+  emm_df  <- data.frame(
+    Level = emm_raw[[1]],
+    Mean  = round(emm_raw$emmean, 3),
+    SE    = round(emm_raw$SE,     3)
+  )
+
+  cont_raw <- as.data.frame(cont)
+  cont_df  <- data.frame(
+    Comparison = cont_raw$contrast,
+    Estimate   = round(cont_raw$estimate, 4),
+    SE_c       = round(cont_raw$SE,       4),
+    `t / z`    = round(if ("t.ratio" %in% names(cont_raw)) cont_raw$t.ratio else cont_raw$z.ratio, 4),
+    `p-value`  = round(cont_raw$p.value,  4),
+    check.names = FALSE
+  )
+  cont_df$Sig <- dplyr::case_when(
+    cont_df$`p-value` < 0.001 ~ "***",
+    cont_df$`p-value` < 0.01  ~ "**",
+    cont_df$`p-value` < 0.05  ~ "*",
+    cont_df$`p-value` < 0.1   ~ ".",
+    TRUE                       ~ "ns"
+  )
+  list(means = emm_df, contrasts = cont_df)
+}
+
+# ── emmeans helper on the response scale (log-LMM, Poisson / NB GLMMs) ────────
+# Means are back-transformed (geometric means for a log response; rates for
+# count models) and the contrast is a ratio.
+emm_response_table <- function(model, factor_name) {
+  emm  <- emmeans(model, as.formula(paste("~", factor_name)), type = "response")
+  emm_raw  <- as.data.frame(emm)
+  cont_raw <- as.data.frame(pairs(emm, adjust = "tukey"))
+  lcl <- intersect(c("lower.CL", "asymp.LCL"), names(emm_raw))[1]
+  ucl <- intersect(c("upper.CL", "asymp.UCL"), names(emm_raw))[1]
+  emm_df <- data.frame(
+    Level    = emm_raw[[1]],
+    Response = round(emm_raw[[2]], 3),
+    SE       = round(emm_raw$SE, 3),
+    LCL      = round(emm_raw[[lcl]], 3),
+    UCL      = round(emm_raw[[ucl]], 3)
+  )
+  stat <- intersect(c("t.ratio", "z.ratio"), names(cont_raw))[1]
+  cont_df <- data.frame(
+    Comparison = cont_raw$contrast,
+    Ratio      = round(cont_raw$ratio, 4),
+    SE_c       = round(cont_raw$SE, 4),
+    `t / z`    = round(cont_raw[[stat]], 4),
+    `p-value`  = round(cont_raw$p.value, 4),
+    check.names = FALSE
+  )
+  list(means = emm_df, contrasts = cont_df)
+}
+
+# ── Data loading ──────────────────────────────────────────────────────────────
+behavior_raw <- read_excel("data/behavior.xlsx") %>%
+  mutate(
+    treatment  = factor(treatment, levels = c("S+W+", "S+W-", "S-W+", "S-W-")),
+    breed      = factor(breed),
+    animal_id  = factor(animal_id),
+    group      = factor(group),
+    day        = as.factor(day),
+    period     = as.factor(period),
+    hour       = as.integer(hour),
+    location   = factor(location,
+                        levels = c("sun", "shade", "sun_between_trees",
+                                   "open_sun", "night")),
+    clock_time = scan_to_clock(hour),
+    daypart    = if_else(hour <= 12, "Daytime", "Nighttime")
+  )
+
+# ── Aggregated behavioral data (one row per animal × day × hour) ──────────────
+# Behavioral categories:
+#   grazing             = grazing only (pure grazing; "other" is no longer added)
+#   other               = other behaviors (analysed as a separate category)
+#   lying               = lying_idle + lying_ruminating (reviewer's "resting")
+#   standing            = idle + ruminating (posture standing, excl. grazing/other)
+#   ruminating_tot      = ruminating + lying_ruminating (any posture)
+behavior <- behavior_raw %>%
+  group_by(treatment, group, breed, animal_id, period, day, hour, clock_time, daypart) %>%
+  summarise(
+    grazing          = sum(grazing,          na.rm = TRUE),
+    idle             = sum(idle,             na.rm = TRUE),
+    lying_idle       = sum(lying_idle,       na.rm = TRUE),
+    ruminating       = sum(ruminating,       na.rm = TRUE),
+    lying_ruminating = sum(lying_ruminating, na.rm = TRUE),
+    other            = sum(other,            na.rm = TRUE),
+    total            = sum(total,            na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    shade          = factor(if_else(str_detect(as.character(treatment), "S\\+"), "S+", "S-"),
+                            levels = c("S+", "S-")),
+    water          = factor(if_else(str_detect(as.character(treatment), "W\\+"), "W+", "W-"),
+                            levels = c("W+", "W-")),
+    lying          = lying_idle + lying_ruminating,            # posture
+    standing       = idle + ruminating,                        # posture
+    ruminating_tot = ruminating + lying_ruminating,            # activity any posture
+    daypart        = factor(daypart, levels = c("Daytime", "Nighttime"))
+  )
+
+behavior_day   <- behavior %>% filter(daypart == "Daytime")
+behavior_night <- behavior %>% filter(daypart == "Nighttime")
+
+# ── Drinking event data ───────────────────────────────────────────────────────
+drinking <- read_excel("data/water_intake_behavior.xlsx") %>%
+  mutate(
+    treatment = factor(treatment, levels = c("S+W+", "S+W-", "S-W+", "S-W-")),
+    animal_id = factor(animal_id),
+    group     = factor(group),
+    period    = factor(period),
+    day       = as.factor(day),
+    hour      = as.factor(hour),
+    shade     = factor(if_else(str_detect(as.character(treatment), "S\\+"), "S+", "S-"),
+                       levels = c("S+", "S-")),
+    water     = factor(if_else(str_detect(as.character(treatment), "W\\+"), "W+", "W-"),
+                       levels = c("W+", "W-"))
+  )
+
+# Daily drinking events per animal. count() alone drops animal-days with zero
+# events, so counts are joined onto the complete animal × day grid (every
+# animal on both collection days of every period, with its group's treatment)
+# and missing animal-days are filled with 0.
+animal_day_grid <- behavior %>%
+  distinct(animal_id, group, period, day, treatment, shade, water)
+
+events <- animal_day_grid %>%
+  mutate(across(c(animal_id, day), as.character)) %>%
+  left_join(
+    drinking %>%
+      mutate(across(c(animal_id, day), as.character)) %>%
+      count(animal_id, day, name = "events"),
+    by = c("animal_id", "day")
+  ) %>%
+  mutate(
+    events    = replace_na(events, 0L),
+    animal_id = factor(animal_id),
+    day       = factor(day, levels = levels(behavior$day))
+  )
+
+# ── Water intake data ─────────────────────────────────────────────────────────
+intake <- read_excel("data/water_intake.xlsx") %>%
+  mutate(
+    treatment         = factor(treatment, levels = c("S+W+", "S+W-", "S-W+", "S-W-")),
+    group             = factor(group),
+    period            = factor(period),
+    day               = factor(day),
+    intake_per_animal = intake_L / 8,
+    shade             = factor(if_else(str_detect(as.character(treatment), "S\\+"), "S+", "S-"),
+                               levels = c("S+", "S-")),
+    water             = factor(if_else(str_detect(as.character(treatment), "W\\+"), "W+", "W-"),
+                               levels = c("W+", "W-"))
+  )
+```
+
+# 1 · Daily Activity Budget
+
+```{r}
+#| code-summary: "Daily activity budget — mutually exclusive behaviors by treatment and period"
+
+budget_tbl <- behavior %>%
+  group_by(treatment, daypart, animal_id) %>%
+  summarise(
+    n_scans = sum(total, na.rm = TRUE),
+    across(c(grazing, lying_idle, lying_ruminating,
+             idle, ruminating, other), ~ sum(., na.rm = TRUE)),
+    .groups = "drop"
+  ) %>%
+  mutate(across(grazing:other, ~ . / n_scans)) %>%
+  group_by(treatment, daypart) %>%
+  summarise(across(grazing:other, ~ round(mean(.) * 100, 1)), .groups = "drop") %>%
+  rename(
+    Treatment         = treatment,
+    Daypart           = daypart,
+    `Grazing (%)`     = grazing,
+    `Lying idle (%)`  = lying_idle,
+    `Lying rum. (%)`  = lying_ruminating,
+    `Standing idle (%)` = idle,
+    `Standing rum. (%)` = ruminating,
+    `Other (%)`       = other
+  )
+
+budget_tbl %>%
+  kbl(caption = "Table 1. Mean proportion of behavioral scans (%) by treatment and period.") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+```
+
+```{r}
+#| code-summary: "Daily activity budget — stacked bar by treatment and period"
+#| fig-cap: "Figure 1. Mean proportion of behavioral scans by treatment and period. Each bar sums to 100%."
+
+budget_long <- behavior %>%
+  group_by(treatment, daypart, animal_id) %>%
+  summarise(
+    n_scans = sum(total, na.rm = TRUE),
+    across(c(grazing, lying_idle, lying_ruminating,
+             idle, ruminating, other), ~ sum(., na.rm = TRUE)),
+    .groups = "drop"
+  ) %>%
+  mutate(across(grazing:other, ~ . / n_scans)) %>%
+  group_by(treatment, daypart) %>%
+  summarise(across(grazing:other, mean), .groups = "drop") %>%
+  pivot_longer(grazing:other, names_to = "behavior", values_to = "proportion") %>%
+  mutate(behavior = factor(behavior,
+    levels = c("grazing", "lying_idle", "lying_ruminating",
+               "idle", "ruminating", "other")))
+
+p_budget <- ggplot(budget_long,
+                   aes(x = treatment, y = proportion, fill = behavior)) +
+  geom_col(position = "fill", width = 0.75) +
+  scale_fill_manual(
+    values = c(
+      "grazing"          = "#2C4A2E",
+      "lying_idle"       = "#4A7FA5",
+      "lying_ruminating" = "#7BADC8",
+      "idle"             = "#C8A84B",
+      "ruminating"       = "#DDB96B",
+      "other"            = "#DDD5C4"
+    ),
+    labels = c("Grazing", "Lying idle", "Lying ruminating",
+               "Standing idle", "Standing ruminating", "Other")
+  ) +
+  scale_y_continuous(labels = scales::percent) +
+  facet_wrap(~ daypart) +
+  labs(x = "Treatment", y = "Proportion of scans", fill = "Behavior") +
+  theme_ws()
+
+ggplotly(p_budget, tooltip = c("x", "y", "fill")) %>%
+  layout(legend = list(orientation = "h", x = 0, y = -0.2))
+```
+
+# 2 · Daytime Behavioral Categories
+
+## 2.1 · Grazing
+
+::: {.panel-tabset}
+
+### By treatment
+
+```{r}
+#| code-summary: "LMM — daytime grazing by treatment"
+
+model_graz_day_trat <- fit_mm(
+  grazing ~ treatment + period + (1 | group) + (1 | group:period) + (1 | animal_id) + (1 | day / hour),
+  data = behavior_day, label = "model_graz_day_trat"
+)
+
+graz_day_trat_emm <- emm_table(model_graz_day_trat, "treatment")
+
+graz_day_trat_emm$means %>%
+  rename(Treatment = Level) %>%
+  kbl(caption = "Table 2. Estimated marginal means — daytime grazing by treatment.",
+      digits = 3) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+
+graz_day_trat_emm$contrasts %>%
+  kbl(caption = "Table 3. Pairwise contrasts — daytime grazing by treatment.",
+      digits = 4) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+```
+
+```{r}
+#| code-summary: "Daytime grazing by treatment — box plot"
+#| fig-cap: "Figure 2. Daytime grazing (scans/h) by treatment."
+
+p_graz_trat <- ggplot(behavior_day,
+                      aes(x = treatment, y = grazing, fill = treatment)) +
+  geom_boxplot(alpha = 0.7, outlier.shape = 21, outlier.size = 1.5) +
+  geom_jitter(width = 0.15, alpha = 0.2, size = 1) +
+  scale_fill_manual(values = pal_treatment) +
+  labs(x = "Treatment", y = "Grazing scans / h (daytime)", fill = NULL) +
+  theme_ws() +
+  theme(legend.position = "none")
+
+ggplotly(p_graz_trat, tooltip = c("x", "y"))
+```
+
+### Shade effect (S+ vs S−)
+
+```{r}
+#| code-summary: "LMM — daytime grazing by shade"
+
+model_graz_day_shade <- fit_mm(
+  grazing ~ shade + period + (1 | group) + (1 | group:period) + (1 | animal_id) + (1 | day / hour),
+  data = behavior_day, label = "model_graz_day_shade"
+)
+
+graz_day_shade_emm <- emm_table(model_graz_day_shade, "shade")
+
+graz_day_shade_emm$means %>%
+  rename(`Shade group` = Level) %>%
+  kbl(caption = "Table 4. Estimated marginal means — daytime grazing by shade.",
+      digits = 3) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+
+graz_day_shade_emm$contrasts %>%
+  kbl(caption = "Table 5. Contrast — daytime grazing S+ vs S−.", digits = 4) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+```
+
+```{r}
+#| code-summary: "Daytime grazing — shade group comparison"
+#| fig-cap: "Figure 3. Daytime grazing (scans/h) by shade group."
+
+p_graz_shade <- ggplot(behavior_day,
+                       aes(x = shade, y = grazing, fill = shade)) +
+  geom_boxplot(alpha = 0.7, outlier.shape = 21) +
+  geom_jitter(width = 0.15, alpha = 0.3, size = 1.5) +
+  scale_fill_manual(values = pal_shade) +
+  labs(x = "Shade group", y = "Grazing scans / h (daytime)", fill = NULL) +
+  theme_ws() +
+  theme(legend.position = "none")
+
+ggplotly(p_graz_shade, tooltip = c("x", "y"))
+```
+
+### Water effect (W+ vs W−)
+
+```{r}
+#| code-summary: "LMM — daytime grazing by water access"
+
+model_graz_day_water <- fit_mm(
+  grazing ~ water + period + (1 | group) + (1 | group:period) + (1 | animal_id) + (1 | day / hour),
+  data = behavior_day, label = "model_graz_day_water"
+)
+
+graz_day_water_emm <- emm_table(model_graz_day_water, "water")
+
+graz_day_water_emm$means %>%
+  rename(`Water group` = Level) %>%
+  kbl(caption = "Table 6. Estimated marginal means — daytime grazing by water.",
+      digits = 3) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+
+graz_day_water_emm$contrasts %>%
+  kbl(caption = "Table 7. Contrast — daytime grazing W+ vs W−.", digits = 4) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+```
+
+```{r}
+#| code-summary: "Daytime grazing — water group comparison"
+#| fig-cap: "Figure 4. Daytime grazing (scans/h) by water group."
+
+p_graz_water <- ggplot(behavior_day,
+                       aes(x = water, y = grazing, fill = water)) +
+  geom_boxplot(alpha = 0.7, outlier.shape = 21) +
+  geom_jitter(width = 0.15, alpha = 0.3, size = 1.5) +
+  scale_fill_manual(values = pal_water) +
+  labs(x = "Water group", y = "Grazing scans / h (daytime)", fill = NULL) +
+  theme_ws() +
+  theme(legend.position = "none")
+
+ggplotly(p_graz_water, tooltip = c("x", "y"))
+```
+
+:::
+
+## 2.2 · Lying
+
+::: {.panel-tabset}
+
+### By treatment
+
+```{r}
+#| code-summary: "LMM — daytime lying by treatment"
+
+model_lying_day_trat <- fit_mm(
+  lying ~ treatment + period + (1 | group) + (1 | group:period) + (1 | animal_id) + (1 | day / hour),
+  data = behavior_day, label = "model_lying_day_trat"
+)
+
+lying_day_trat_emm <- emm_table(model_lying_day_trat, "treatment")
+
+lying_day_trat_emm$means %>%
+  rename(Treatment = Level) %>%
+  kbl(caption = "Table 8. Estimated marginal means — daytime lying by treatment.",
+      digits = 3) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+
+lying_day_trat_emm$contrasts %>%
+  kbl(caption = "Table 9. Pairwise contrasts — daytime lying by treatment.",
+      digits = 4) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+```
+
+```{r}
+#| code-summary: "Daytime lying by treatment — box plot"
+#| fig-cap: "Figure 5. Daytime lying behavior (scans/h) by treatment."
+
+p_lying_trat <- ggplot(behavior_day,
+                       aes(x = treatment, y = lying, fill = treatment)) +
+  geom_boxplot(alpha = 0.7, outlier.shape = 21, outlier.size = 1.5) +
+  geom_jitter(width = 0.15, alpha = 0.2, size = 1) +
+  scale_fill_manual(values = pal_treatment) +
+  labs(x = "Treatment", y = "Lying scans / h (daytime)", fill = NULL) +
+  theme_ws() +
+  theme(legend.position = "none")
+
+ggplotly(p_lying_trat, tooltip = c("x", "y"))
+```
+
+### Shade effect (S+ vs S−)
+
+```{r}
+#| code-summary: "LMM — daytime lying by shade"
+
+model_lying_day_shade <- fit_mm(
+  lying ~ shade + period + (1 | group) + (1 | group:period) + (1 | animal_id) + (1 | day / hour),
+  data = behavior_day, label = "model_lying_day_shade"
+)
+
+lying_day_shade_emm <- emm_table(model_lying_day_shade, "shade")
+
+lying_day_shade_emm$means %>%
+  rename(`Shade group` = Level) %>%
+  kbl(caption = "Table 10. Estimated marginal means — daytime lying by shade.",
+      digits = 3) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+
+lying_day_shade_emm$contrasts %>%
+  kbl(caption = "Table 11. Contrast — daytime lying S+ vs S−.", digits = 4) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+```
+
+```{r}
+#| code-summary: "Daytime lying — shade group comparison"
+#| fig-cap: "Figure 6. Daytime lying (scans/h) by shade group."
+
+p_lying_shade <- ggplot(behavior_day,
+                        aes(x = shade, y = lying, fill = shade)) +
+  geom_boxplot(alpha = 0.7, outlier.shape = 21) +
+  geom_jitter(width = 0.15, alpha = 0.3, size = 1.5) +
+  scale_fill_manual(values = pal_shade) +
+  labs(x = "Shade group", y = "Lying scans / h (daytime)", fill = NULL) +
+  theme_ws() +
+  theme(legend.position = "none")
+
+ggplotly(p_lying_shade, tooltip = c("x", "y"))
+```
+
+### Water effect (W+ vs W−)
+
+```{r}
+#| code-summary: "LMM — daytime lying by water access"
+
+model_lying_day_water <- fit_mm(
+  lying ~ water + period + (1 | group) + (1 | group:period) + (1 | animal_id) + (1 | day / hour),
+  data = behavior_day, label = "model_lying_day_water"
+)
+
+lying_day_water_emm <- emm_table(model_lying_day_water, "water")
+
+lying_day_water_emm$means %>%
+  rename(`Water group` = Level) %>%
+  kbl(caption = "Table 12. Estimated marginal means — daytime lying by water.",
+      digits = 3) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+
+lying_day_water_emm$contrasts %>%
+  kbl(caption = "Table 13. Contrast — daytime lying W+ vs W−.", digits = 4) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+```
+
+```{r}
+#| code-summary: "Daytime lying — water group comparison"
+#| fig-cap: "Figure 7. Daytime lying (scans/h) by water group."
+
+p_lying_water <- ggplot(behavior_day,
+                        aes(x = water, y = lying, fill = water)) +
+  geom_boxplot(alpha = 0.7, outlier.shape = 21) +
+  geom_jitter(width = 0.15, alpha = 0.3, size = 1.5) +
+  scale_fill_manual(values = pal_water) +
+  labs(x = "Water group", y = "Lying scans / h (daytime)", fill = NULL) +
+  theme_ws() +
+  theme(legend.position = "none")
+
+ggplotly(p_lying_water, tooltip = c("x", "y"))
+```
+
+:::
+
+## 2.3 · Ruminating (any posture)
+
+::: {.panel-tabset}
+
+### By treatment
+
+```{r}
+#| code-summary: "LMM — daytime ruminating (any posture) by treatment"
+
+model_rum_day_trat <- fit_mm(
+  ruminating_tot ~ treatment + period + (1 | group) + (1 | group:period) + (1 | animal_id) + (1 | day / hour),
+  data = behavior_day, label = "model_rum_day_trat"
+)
+
+rum_day_trat_emm <- emm_table(model_rum_day_trat, "treatment")
+
+rum_day_trat_emm$means %>%
+  rename(Treatment = Level) %>%
+  kbl(caption = "Table 14. Estimated marginal means — daytime ruminating (any posture) by treatment.",
+      digits = 3) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+
+rum_day_trat_emm$contrasts %>%
+  kbl(caption = "Table 15. Pairwise contrasts — daytime ruminating by treatment.",
+      digits = 4) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+```
+
+```{r}
+#| code-summary: "Daytime ruminating by treatment — box plot"
+#| fig-cap: "Figure 8. Daytime ruminating behavior (scans/h) by treatment."
+
+p_rum_trat <- ggplot(behavior_day,
+                     aes(x = treatment, y = ruminating_tot, fill = treatment)) +
+  geom_boxplot(alpha = 0.7, outlier.shape = 21, outlier.size = 1.5) +
+  geom_jitter(width = 0.15, alpha = 0.2, size = 1) +
+  scale_fill_manual(values = pal_treatment) +
+  labs(x = "Treatment", y = "Ruminating scans / h (daytime)", fill = NULL) +
+  theme_ws() +
+  theme(legend.position = "none")
+
+ggplotly(p_rum_trat, tooltip = c("x", "y"))
+```
+
+### Shade effect (S+ vs S−)
+
+```{r}
+#| code-summary: "LMM — daytime ruminating by shade"
+
+model_rum_day_shade <- fit_mm(
+  ruminating_tot ~ shade + period + (1 | group) + (1 | group:period) + (1 | animal_id) + (1 | day / hour),
+  data = behavior_day, label = "model_rum_day_shade"
+)
+
+rum_day_shade_emm <- emm_table(model_rum_day_shade, "shade")
+
+rum_day_shade_emm$means %>%
+  rename(`Shade group` = Level) %>%
+  kbl(caption = "Table 16. Estimated marginal means — daytime ruminating by shade.",
+      digits = 3) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+
+rum_day_shade_emm$contrasts %>%
+  kbl(caption = "Table 17. Contrast — daytime ruminating S+ vs S−.", digits = 4) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+```
+
+```{r}
+#| code-summary: "Daytime ruminating — shade group comparison"
+#| fig-cap: "Figure 9. Daytime ruminating (scans/h) by shade group."
+
+p_rum_shade <- ggplot(behavior_day,
+                      aes(x = shade, y = ruminating_tot, fill = shade)) +
+  geom_boxplot(alpha = 0.7, outlier.shape = 21) +
+  geom_jitter(width = 0.15, alpha = 0.3, size = 1.5) +
+  scale_fill_manual(values = pal_shade) +
+  labs(x = "Shade group", y = "Ruminating scans / h (daytime)", fill = NULL) +
+  theme_ws() +
+  theme(legend.position = "none")
+
+ggplotly(p_rum_shade, tooltip = c("x", "y"))
+```
+
+### Water effect (W+ vs W−)
+
+```{r}
+#| code-summary: "LMM — daytime ruminating by water access"
+
+model_rum_day_water <- fit_mm(
+  ruminating_tot ~ water + period + (1 | group) + (1 | group:period) + (1 | animal_id) + (1 | day / hour),
+  data = behavior_day, label = "model_rum_day_water"
+)
+
+rum_day_water_emm <- emm_table(model_rum_day_water, "water")
+
+rum_day_water_emm$means %>%
+  rename(`Water group` = Level) %>%
+  kbl(caption = "Table 18. Estimated marginal means — daytime ruminating by water.",
+      digits = 3) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+
+rum_day_water_emm$contrasts %>%
+  kbl(caption = "Table 19. Contrast — daytime ruminating W+ vs W−.", digits = 4) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+```
+
+```{r}
+#| code-summary: "Daytime ruminating — water group comparison"
+#| fig-cap: "Figure 10. Daytime ruminating (scans/h) by water group."
+
+p_rum_water <- ggplot(behavior_day,
+                      aes(x = water, y = ruminating_tot, fill = water)) +
+  geom_boxplot(alpha = 0.7, outlier.shape = 21) +
+  geom_jitter(width = 0.15, alpha = 0.3, size = 1.5) +
+  scale_fill_manual(values = pal_water) +
+  labs(x = "Water group", y = "Ruminating scans / h (daytime)", fill = NULL) +
+  theme_ws() +
+  theme(legend.position = "none")
+
+ggplotly(p_rum_water, tooltip = c("x", "y"))
+```
+
+:::
+
+## 2.4 · Standing
+
+::: {.panel-tabset}
+
+### By treatment
+
+```{r}
+#| code-summary: "LMM — daytime standing by treatment"
+
+model_stand_day_trat <- fit_mm(
+  standing ~ treatment + period + (1 | group) + (1 | group:period) + (1 | animal_id) + (1 | day / hour),
+  data = behavior_day, label = "model_stand_day_trat"
+)
+
+stand_day_trat_emm <- emm_table(model_stand_day_trat, "treatment")
+
+stand_day_trat_emm$means %>%
+  rename(Treatment = Level) %>%
+  kbl(caption = "Table 20. Estimated marginal means — daytime standing by treatment.",
+      digits = 3) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+
+stand_day_trat_emm$contrasts %>%
+  kbl(caption = "Table 21. Pairwise contrasts — daytime standing by treatment.",
+      digits = 4) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+```
+
+```{r}
+#| code-summary: "Daytime standing by treatment — box plot"
+#| fig-cap: "Figure 11. Daytime standing behavior (scans/h) by treatment."
+
+p_stand_trat <- ggplot(behavior_day,
+                       aes(x = treatment, y = standing, fill = treatment)) +
+  geom_boxplot(alpha = 0.7, outlier.shape = 21, outlier.size = 1.5) +
+  geom_jitter(width = 0.15, alpha = 0.2, size = 1) +
+  scale_fill_manual(values = pal_treatment) +
+  labs(x = "Treatment", y = "Standing scans / h (daytime)", fill = NULL) +
+  theme_ws() +
+  theme(legend.position = "none")
+
+ggplotly(p_stand_trat, tooltip = c("x", "y"))
+```
+
+### Shade effect (S+ vs S−)
+
+```{r}
+#| code-summary: "LMM — daytime standing by shade"
+
+model_stand_day_shade <- fit_mm(
+  standing ~ shade + period + (1 | group) + (1 | group:period) + (1 | animal_id) + (1 | day / hour),
+  data = behavior_day, label = "model_stand_day_shade"
+)
+
+stand_day_shade_emm <- emm_table(model_stand_day_shade, "shade")
+
+stand_day_shade_emm$means %>%
+  rename(`Shade group` = Level) %>%
+  kbl(caption = "Table 22. Estimated marginal means — daytime standing by shade.",
+      digits = 3) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+
+stand_day_shade_emm$contrasts %>%
+  kbl(caption = "Table 23. Contrast — daytime standing S+ vs S−.", digits = 4) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+```
+
+```{r}
+#| code-summary: "Daytime standing — shade group comparison"
+#| fig-cap: "Figure 12. Daytime standing (scans/h) by shade group."
+
+p_stand_shade <- ggplot(behavior_day,
+                        aes(x = shade, y = standing, fill = shade)) +
+  geom_boxplot(alpha = 0.7, outlier.shape = 21) +
+  geom_jitter(width = 0.15, alpha = 0.3, size = 1.5) +
+  scale_fill_manual(values = pal_shade) +
+  labs(x = "Shade group", y = "Standing scans / h (daytime)", fill = NULL) +
+  theme_ws() +
+  theme(legend.position = "none")
+
+ggplotly(p_stand_shade, tooltip = c("x", "y"))
+```
+
+### Water effect (W+ vs W−)
+
+```{r}
+#| code-summary: "LMM — daytime standing by water access"
+
+model_stand_day_water <- fit_mm(
+  standing ~ water + period + (1 | group) + (1 | group:period) + (1 | animal_id) + (1 | day / hour),
+  data = behavior_day, label = "model_stand_day_water"
+)
+
+stand_day_water_emm <- emm_table(model_stand_day_water, "water")
+
+stand_day_water_emm$means %>%
+  rename(`Water group` = Level) %>%
+  kbl(caption = "Table 24. Estimated marginal means — daytime standing by water.",
+      digits = 3) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+
+stand_day_water_emm$contrasts %>%
+  kbl(caption = "Table 25. Contrast — daytime standing W+ vs W−.", digits = 4) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+```
+
+```{r}
+#| code-summary: "Daytime standing — water group comparison"
+#| fig-cap: "Figure 13. Daytime standing (scans/h) by water group."
+
+p_stand_water <- ggplot(behavior_day,
+                        aes(x = water, y = standing, fill = water)) +
+  geom_boxplot(alpha = 0.7, outlier.shape = 21) +
+  geom_jitter(width = 0.15, alpha = 0.3, size = 1.5) +
+  scale_fill_manual(values = pal_water) +
+  labs(x = "Water group", y = "Standing scans / h (daytime)", fill = NULL) +
+  theme_ws() +
+  theme(legend.position = "none")
+
+ggplotly(p_stand_water, tooltip = c("x", "y"))
+```
+
+:::
+
+## 2.5 · Other
+
+"Other" covers any behavior not in the ethogram categories above. It was previously added to grazing; it is now analysed separately and grazing refers to pure grazing only.
+
+::: {.panel-tabset}
+
+### By treatment
+
+```{r}
+#| code-summary: "LMM — daytime other behaviors by treatment"
+
+model_other_day_trat <- fit_mm(
+  other ~ treatment + period + (1 | group) + (1 | group:period) + (1 | animal_id) + (1 | day / hour),
+  data = behavior_day, label = "model_other_day_trat"
+)
+
+other_day_trat_emm <- emm_table(model_other_day_trat, "treatment")
+
+other_day_trat_emm$means %>%
+  rename(Treatment = Level) %>%
+  kbl(caption = "Table 25a. Estimated marginal means — daytime other behaviors by treatment.",
+      digits = 3) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+
+other_day_trat_emm$contrasts %>%
+  kbl(caption = "Table 25b. Pairwise contrasts — daytime other behaviors by treatment.",
+      digits = 4) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+```
+
+```{r}
+#| code-summary: "Daytime other behaviors by treatment — box plot"
+#| fig-cap: "Figure 13a. Daytime other behaviors (scans/h) by treatment."
+
+p_other_trat <- ggplot(behavior_day,
+                       aes(x = treatment, y = other, fill = treatment)) +
+  geom_boxplot(alpha = 0.7, outlier.shape = 21, outlier.size = 1.5) +
+  geom_jitter(width = 0.15, alpha = 0.2, size = 1) +
+  scale_fill_manual(values = pal_treatment) +
+  labs(x = "Treatment", y = "Other scans / h (daytime)", fill = NULL) +
+  theme_ws() +
+  theme(legend.position = "none")
+
+ggplotly(p_other_trat, tooltip = c("x", "y"))
+```
+
+### Shade effect (S+ vs S−)
+
+```{r}
+#| code-summary: "LMM — daytime other behaviors by shade"
+
+model_other_day_shade <- fit_mm(
+  other ~ shade + period + (1 | group) + (1 | group:period) + (1 | animal_id) + (1 | day / hour),
+  data = behavior_day, label = "model_other_day_shade"
+)
+
+other_day_shade_emm <- emm_table(model_other_day_shade, "shade")
+
+other_day_shade_emm$means %>%
+  rename(`Shade group` = Level) %>%
+  kbl(caption = "Table 25c. Estimated marginal means — daytime other behaviors by shade.",
+      digits = 3) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+
+other_day_shade_emm$contrasts %>%
+  kbl(caption = "Table 25d. Contrast — daytime other behaviors S+ vs S−.", digits = 4) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+```
+
+### Water effect (W+ vs W−)
+
+```{r}
+#| code-summary: "LMM — daytime other behaviors by water access"
+
+model_other_day_water <- fit_mm(
+  other ~ water + period + (1 | group) + (1 | group:period) + (1 | animal_id) + (1 | day / hour),
+  data = behavior_day, label = "model_other_day_water"
+)
+
+other_day_water_emm <- emm_table(model_other_day_water, "water")
+
+other_day_water_emm$means %>%
+  rename(`Water group` = Level) %>%
+  kbl(caption = "Table 25e. Estimated marginal means — daytime other behaviors by water.",
+      digits = 3) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+
+other_day_water_emm$contrasts %>%
+  kbl(caption = "Table 25f. Contrast — daytime other behaviors W+ vs W−.", digits = 4) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+```
+
+:::
+
+# 3 · Nocturnal Grazing
+
+::: {.panel-tabset}
+
+### Shade effect (S+ vs S−)
+
+```{r}
+#| code-summary: "LMM — nocturnal grazing by shade group"
+
+model_graze_night_shade <- fit_mm(
+  grazing ~ shade + period + (1 | group) + (1 | group:period) + (1 | animal_id) + (1 | day / hour),
+  data = behavior_night, label = "model_graze_night_shade"
+)
+
+graze_night_shade_emm <- emm_table(model_graze_night_shade, "shade")
+
+graze_night_shade_emm$means %>%
+  rename(`Shade group` = Level) %>%
+  kbl(caption = "Table 26. Estimated marginal means — nocturnal grazing by shade.",
+      digits = 3) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+
+graze_night_shade_emm$contrasts %>%
+  kbl(caption = "Table 27. Contrast — nocturnal grazing S+ vs S−.", digits = 4) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+```
+
+```{r}
+#| code-summary: "Nocturnal grazing — shade group"
+#| fig-cap: "Figure 14. Nocturnal grazing (scans/h) by shade group."
+
+p_graze_night_shade <- ggplot(behavior_night,
+                               aes(x = shade, y = grazing, fill = shade)) +
+  geom_boxplot(alpha = 0.7, outlier.shape = 21) +
+  geom_jitter(width = 0.15, alpha = 0.3, size = 1.5) +
+  scale_fill_manual(values = pal_shade) +
+  labs(x = "Shade group", y = "Grazing scans / h (nighttime)", fill = NULL) +
+  theme_ws() +
+  theme(legend.position = "none")
+
+ggplotly(p_graze_night_shade, tooltip = c("x", "y"))
+```
+
+### Water effect (W+ vs W−)
+
+```{r}
+#| code-summary: "LMM — nocturnal grazing by water access"
+
+model_graze_night_water <- fit_mm(
+  grazing ~ water + period + (1 | group) + (1 | group:period) + (1 | animal_id) + (1 | day / hour),
+  data = behavior_night, label = "model_graze_night_water"
+)
+
+graze_night_water_emm <- emm_table(model_graze_night_water, "water")
+
+graze_night_water_emm$means %>%
+  rename(`Water group` = Level) %>%
+  kbl(caption = "Table 28. Estimated marginal means — nocturnal grazing by water.",
+      digits = 3) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+
+graze_night_water_emm$contrasts %>%
+  kbl(caption = "Table 29. Contrast — nocturnal grazing W+ vs W−.", digits = 4) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+```
+
+```{r}
+#| code-summary: "Nocturnal grazing — water group"
+#| fig-cap: "Figure 15. Nocturnal grazing (scans/h) by water group."
+
+p_graze_night_water <- ggplot(behavior_night,
+                               aes(x = water, y = grazing, fill = water)) +
+  geom_boxplot(alpha = 0.7, outlier.shape = 21) +
+  geom_jitter(width = 0.15, alpha = 0.3, size = 1.5) +
+  scale_fill_manual(values = pal_water) +
+  labs(x = "Water group", y = "Grazing scans / h (nighttime)", fill = NULL) +
+  theme_ws() +
+  theme(legend.position = "none")
+
+ggplotly(p_graze_night_water, tooltip = c("x", "y"))
+```
+
+### By treatment
+
+```{r}
+#| code-summary: "LMM — nocturnal grazing by treatment"
+
+model_graze_night_trat <- fit_mm(
+  grazing ~ treatment + period + (1 | group) + (1 | group:period) + (1 | animal_id) + (1 | day / hour),
+  data = behavior_night, label = "model_graze_night_trat"
+)
+
+graze_night_trat_emm <- emm_table(model_graze_night_trat, "treatment")
+
+graze_night_trat_emm$means %>%
+  rename(Treatment = Level) %>%
+  kbl(caption = "Table 30. Estimated marginal means — nocturnal grazing by treatment.",
+      digits = 3) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+
+graze_night_trat_emm$contrasts %>%
+  kbl(caption = "Table 31. Pairwise contrasts — nocturnal grazing by treatment.",
+      digits = 4) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+```
+
+```{r}
+#| code-summary: "Nocturnal grazing by treatment — box plot"
+#| fig-cap: "Figure 16. Nocturnal grazing (scans/h) by treatment."
+
+p_graze_night_trat <- ggplot(behavior_night,
+                              aes(x = treatment, y = grazing, fill = treatment)) +
+  geom_boxplot(alpha = 0.7, outlier.shape = 21, outlier.size = 1.5) +
+  geom_jitter(width = 0.15, alpha = 0.2, size = 1) +
+  scale_fill_manual(values = pal_treatment) +
+  labs(x = "Treatment", y = "Grazing scans / h (nighttime)", fill = NULL) +
+  theme_ws() +
+  theme(legend.position = "none")
+
+ggplotly(p_graze_night_trat, tooltip = c("x", "y"))
+```
+
+### Other Nocturnal Behaviors
+
+```{r}
+#| code-summary: "LMM — nocturnal lying, ruminating, standing, and other by treatment"
+
+model_lying_night_trat <- fit_mm(
+  lying ~ treatment + period + (1 | group) + (1 | group:period) + (1 | animal_id) + (1 | day / hour),
+  data = behavior_night, label = "model_lying_night_trat"
+)
+
+model_rum_night_trat <- fit_mm(
+  ruminating_tot ~ treatment + period + (1 | group) + (1 | group:period) + (1 | animal_id) + (1 | day / hour),
+  data = behavior_night, label = "model_rum_night_trat"
+)
+
+model_stand_night_trat <- fit_mm(
+  standing ~ treatment + period + (1 | group) + (1 | group:period) + (1 | animal_id) + (1 | day / hour),
+  data = behavior_night, label = "model_stand_night_trat"
+)
+
+model_other_night_trat <- fit_mm(
+  other ~ treatment + period + (1 | group) + (1 | group:period) + (1 | animal_id) + (1 | day / hour),
+  data = behavior_night, label = "model_other_night_trat"
+)
+
+lying_night_trat_emm <- emm_table(model_lying_night_trat, "treatment")
+rum_night_trat_emm   <- emm_table(model_rum_night_trat,   "treatment")
+stand_night_trat_emm <- emm_table(model_stand_night_trat, "treatment")
+other_night_trat_emm <- emm_table(model_other_night_trat, "treatment")
+
+# EMM tables for the four nocturnal behaviors
+bind_rows(
+  lying_night_trat_emm$means %>% mutate(Behavior = "Lying"),
+  rum_night_trat_emm$means   %>% mutate(Behavior = "Ruminating"),
+  stand_night_trat_emm$means %>% mutate(Behavior = "Standing"),
+  other_night_trat_emm$means %>% mutate(Behavior = "Other")
+) %>%
+  rename(Treatment = Level) %>%
+  select(Behavior, Treatment, Mean, SE) %>%
+  kbl(caption = "Estimated marginal means — nocturnal behaviors by treatment.",
+      digits = 3) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+```
+
+:::
+
+# 4 · 24-hour Behavioral Profile
+
+```{r}
+#| code-summary: "Full 24h profile of grazing, lying, standing, and ruminating"
+#| fig-cap: "Figure 17. Mean scans per hour across the full 24-hour cycle by treatment. Dashed line marks the daytime–nighttime transition (19:00h). Ruminating (any posture) overlaps with lying and standing."
+
+full_ts <- behavior %>%
+  group_by(treatment, hour, clock_time) %>%
+  summarise(
+    Grazing    = mean(grazing,        na.rm = TRUE),
+    Lying      = mean(lying,          na.rm = TRUE),
+    Standing   = mean(standing,       na.rm = TRUE),
+    Ruminating = mean(ruminating_tot, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  pivot_longer(c(Grazing, Lying, Standing, Ruminating),
+               names_to = "behavior", values_to = "mean") %>%
+  mutate(clock_time = factor(clock_time, levels = clock_labels))
+
+p_full_ts <- ggplot(full_ts,
+                    aes(x = hour, y = mean,
+                        color = behavior, group = behavior)) +
+  geom_vline(xintercept = 12.5, linetype = "dashed",
+             color = "#6B6B6B", linewidth = 0.7) +
+  annotate("text", x = 6.5,  y = max(full_ts$mean, na.rm = TRUE) * 0.96,
+         label = "Daytime",   hjust = 0.5, size = 3, color = "#6B6B6B") +
+  annotate("text", x = 18.5, y = max(full_ts$mean, na.rm = TRUE) * 0.96,
+         label = "Nighttime", hjust = 0.5, size = 3, color = "#6B6B6B") +
+  geom_line(linewidth = 1) +
+  geom_point(size = 1.8) +
+  scale_color_manual(values = c(
+    "Grazing"    = "#2C4A2E",
+    "Lying"      = "#4A7FA5",
+    "Standing"   = "#C8A84B",
+    "Ruminating" = "#6B4C35"
+  )) +
+  scale_x_continuous(breaks = 1:24, labels = unname(clock_labels)) +
+  facet_wrap(~ treatment, nrow = 2) +
+  labs(x = "Clock time", y = "Mean scans / h", color = "Behavior") +
+  theme_ws(angle_x = 45)
+
+ggplotly(p_full_ts, tooltip = c("x", "y", "color")) %>%
+  layout(legend = list(orientation = "h", x = 0.35, y = -0.15))
+```
+
+# 5 · Drinking Behavior and Water Intake
+
+## 5.1 · Drinking Frequency
+
+Daily drinking events are counted on the complete animal × day grid: every animal on both collection days of its period, with animal-days without any drinking event entered as 0.
+
+```{r}
+#| code-summary: "Poisson GLMM — drinking events by water group (zero days included)"
+
+model_events <- fit_mm(
+  events ~ water + period + (1 | group) + (1 | group:period) + (1 | animal_id) + (1 | day),
+  data = events, family = poisson, label = "model_events (Poisson)"
+)
+
+# ── Dispersion check (Pearson) ────────────────────────────────────────────────
+overdisp <- overdisp_fun(model_events)
+
+overdisp_tbl <- tibble(
+  Metric = c("Animal-days (incl. zero days)", "Animal-days with zero events",
+             "Pearson chi-square", "Residual df", "Dispersion ratio", "p-value (overdispersion)"),
+  Value  = c(nrow(events), sum(events$events == 0),
+             round(overdisp["chisq"], 2),
+             round(overdisp["rdf"],   0),
+             round(overdisp["ratio"], 3),
+             formatC(overdisp["p"], format = "e", digits = 2))
+)
+
+overdisp_tbl %>%
+  kbl(caption = "Table 32. Dispersion diagnostics for the Poisson GLMM of daily drinking events.") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+
+emm_events  <- emmeans(model_events, ~ water, type = "response")
+cont_events <- pairs(emm_events, adjust = "tukey")
+
+emm_events_df <- as.data.frame(emm_events) %>%
+  rename(`Water group` = water, Rate = rate) %>%
+  select(`Water group`, Rate, SE, asymp.LCL, asymp.UCL) %>%
+  mutate(across(where(is.numeric), ~ round(., 3)))
+
+cont_events_df <- as.data.frame(cont_events) %>%
+  rename(Comparison = contrast, `Rate ratio` = ratio,
+         SE_c = SE, `z` = z.ratio, `p-value` = p.value) %>%
+  select(Comparison, `Rate ratio`, SE_c, `z`, `p-value`) %>%
+  mutate(
+    across(where(is.numeric), ~ round(., 4)),
+    Sig = case_when(
+      `p-value` < 0.001 ~ "***",
+      `p-value` < 0.01  ~ "**",
+      `p-value` < 0.05  ~ "*",
+      `p-value` < 0.1   ~ ".",
+      TRUE               ~ "ns"
+    )
+  )
+
+emm_events_df %>%
+  kbl(caption = "Table 33. Back-transformed estimated means — drinking events/day by water group.",
+      digits = 3) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+
+cont_events_df %>%
+  kbl(caption = "Table 34. Contrast — drinking events W+ vs W− (rate ratio).", digits = 4) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+```
+
+```{r}
+#| code-summary: "Sensitivity check — generalized Poisson GLMM (glmmTMB) if underdispersed"
+
+# A dispersion ratio clearly below 1 (< 0.8) means the Poisson model overstates
+# the variance, so a generalized Poisson model is fitted as a sensitivity check.
+events_underdispersed <- overdisp["ratio"] < 0.8
+
+if (events_underdispersed) {
+  model_events_gp <- glmmTMB(
+    events ~ water + period + (1 | group) + (1 | group:period) + (1 | animal_id) + (1 | day),
+    data   = events,
+    family = genpois
+  )
+  log_tmb(model_events_gp, "model_events (generalized Poisson)")
+  cont_events_gp <- as.data.frame(pairs(emmeans(model_events_gp, ~ water, type = "response")))
+  emm_events_gp  <- as.data.frame(emmeans(model_events_gp, ~ water, type = "response"))
+
+  events_sens_tbl <- tibble(
+    Model        = c("Poisson (glmer)", "Generalized Poisson (glmmTMB)"),
+    `Rate W+`    = c(emm_events_df$Rate[1], emm_events_gp$rate[1]),
+    `Rate W−`    = c(emm_events_df$Rate[2], emm_events_gp$rate[2]),
+    `Rate ratio` = c(cont_events_df$`Rate ratio`[1], cont_events_gp$ratio[1]),
+    `p-value`    = c(cont_events_df$`p-value`[1], cont_events_gp$p.value[1]),
+    `Dispersion (genpois φ)` = c(NA, sigma(model_events_gp)),
+    AIC          = c(AIC(model_events), AIC(model_events_gp))
+  ) %>%
+    mutate(across(where(is.numeric), ~ round(., 4)))
+
+  events_sens_tbl %>%
+    kbl(caption = "Table 34a. Sensitivity check — Poisson vs generalized Poisson GLMM for daily drinking events.") %>%
+    kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+    row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+} else {
+  cat("Dispersion ratio =", round(overdisp["ratio"], 3),
+      "— not clearly below 1; the generalized Poisson sensitivity fit was not required.")
+}
+```
+
+```{r}
+#| code-summary: "Drinking events — mean ± SE with individual observations by treatment"
+#| fig-cap: "Figure 18. Drinking events per animal per day by treatment (animal-days with no drinking events included as 0). Points are individual animal-day observations; diamonds and bars show group mean ± SE."
+
+events_summary_plot <- events %>%
+  group_by(treatment, water) %>%
+  summarise(
+    mean = mean(events),
+    se   = sd(events) / sqrt(n()),
+    .groups = "drop"
+  )
+
+p_events <- ggplot(events, aes(x = treatment, color = treatment)) +
+  geom_jitter(aes(y = events), width = 0.15, height = 0.1, alpha = 0.45,
+              size = 2.5, shape = 16) +
+  geom_pointrange(
+    data = events_summary_plot,
+    aes(y = mean, ymin = mean - se, ymax = mean + se),
+    shape = 18, size = 0.9, linewidth = 1.1, color = "black"
+  ) +
+  scale_color_manual(values = pal_treatment) +
+  labs(x = "Treatment", y = "Drinking events / animal / day", color = NULL) +
+  theme_ws() +
+  theme(legend.position = "none")
+
+ggplotly(p_events, tooltip = c("x", "y"))
+```
+
+## 5.2 · Daily Water Intake
+
+Water intake was measured per group and day (group intake ÷ 8), so the model has no animal term: group and group × period are random, and day within group × period is the residual.
+
+```{r}
+#| code-summary: "LMM — daily water intake by water group"
+
+model_intake <- fit_mm(
+  intake_per_animal ~ water + period + (1 | group) + (1 | group:period),
+  data = intake, label = "model_intake"
+)
+
+intake_emm <- emm_table(model_intake, "water")
+
+intake_emm$means %>%
+  rename(`Water group` = Level, `Mean (L/animal/day)` = Mean) %>%
+  kbl(caption = "Table 35. Estimated marginal means — daily water intake by water group.",
+      digits = 2) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+
+intake_emm$contrasts %>%
+  kbl(caption = "Table 36. Contrast — daily water intake W+ vs W−.", digits = 4) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+```
+
+```{r}
+#| code-summary: "Daily water intake — bar chart with individual observations"
+#| fig-cap: "Figure 19. Daily water intake (L/animal/day) by treatment. Bars show group mean ± SE; points show daily group observations."
+
+intake_summary_plot <- intake %>%
+  group_by(treatment, water) %>%
+  summarise(
+    mean = mean(intake_per_animal, na.rm = TRUE),
+    se   = sd(intake_per_animal,   na.rm = TRUE) / sqrt(n()),
+    .groups = "drop"
+  )
+
+p_intake <- ggplot(intake_summary_plot,
+                   aes(x = treatment, y = mean, fill = treatment)) +
+  geom_col(alpha = 0.8, width = 0.65) +
+  geom_errorbar(aes(ymin = mean - se, ymax = mean + se),
+                width = 0.2, linewidth = 0.8) +
+  geom_point(data = intake,
+             aes(y = intake_per_animal, color = treatment),
+             position = position_jitter(width = 0.08),
+             alpha = 0.6, size = 2.2, shape = 16) +
+  scale_fill_manual(values = pal_treatment) +
+  scale_color_manual(values = pal_treatment) +
+  labs(x = "Treatment", y = "Water intake (L / animal / day)") +
+  theme_ws() +
+  theme(legend.position = "none")
+
+ggplotly(p_intake, tooltip = c("x", "y"))
+```
+
+## 5.3 · Drinking Bout Characteristics
+
+::: {.panel-tabset}
+
+### Drinking duration
+
+Drinking duration is right-skewed, so it is modelled on the log scale; estimated means are back-transformed and are therefore **geometric means**, and the contrast is a ratio of geometric means.
+
+```{r}
+#| code-summary: "LMM — log drinking duration by water group (geometric means)"
+
+model_drink_time <- fit_mm(
+  log(drinking_time_s) ~ water + period + (1 | group) + (1 | group:period) + (1 | animal_id) + (1 | day),
+  data = drinking, label = "model_drink_time (log)"
+)
+
+drink_time_emm <- emm_response_table(model_drink_time, "water")
+
+drink_time_emm$means %>%
+  rename(`Water group` = Level, `Geometric mean duration (s)` = Response) %>%
+  kbl(caption = "Table 37. Back-transformed estimated marginal means (geometric means) — drinking duration by water group.",
+      digits = 2) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+
+drink_time_emm$contrasts %>%
+  rename(`Ratio of geometric means` = Ratio) %>%
+  kbl(caption = "Table 38. Contrast — drinking duration W+ / W− (ratio of geometric means).", digits = 4) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+```
+
+```{r}
+#| code-summary: "Drinking duration — boxplot + jitter by treatment"
+#| fig-cap: "Figure 20. Drinking bout duration (s, log scale) by treatment. Boxes show interquartile range; horizontal line = median; points are individual observations."
+
+p_drink_time <- ggplot(drinking,
+                       aes(x = treatment, y = drinking_time_s, fill = treatment)) +
+  geom_boxplot(alpha = 0.7, outlier.shape = NA) +
+  geom_jitter(width = 0.15, alpha = 0.3, size = 1.2) +
+  scale_fill_manual(values = pal_treatment) +
+  scale_y_log10() +
+  labs(x = "Treatment", y = "Drinking duration (s, log scale)") +
+  theme_ws() +
+  theme(legend.position = "none")
+
+ggplotly(p_drink_time, tooltip = c("x", "y"))
+```
+
+### Sips per event
+
+Sips per event is a count, so it is modelled with a Poisson GLMM; if the Pearson dispersion ratio indicates overdispersion (ratio > 1.2 with p < 0.05), the model is refitted as a negative binomial GLMM (glmmTMB, `nbinom2`) and that model is reported.
+
+```{r}
+#| code-summary: "Poisson GLMM — sips per event by water group (NB2 if overdispersed)"
+
+model_sips_pois <- fit_mm(
+  sips ~ water + period + (1 | group) + (1 | group:period) + (1 | animal_id) + (1 | day),
+  data = drinking, family = poisson, label = "model_sips (Poisson)"
+)
+
+overdisp_sips <- overdisp_fun(model_sips_pois)
+sips_overdispersed <- overdisp_sips["ratio"] > 1.2 & overdisp_sips["p"] < 0.05
+
+if (sips_overdispersed) {
+  model_sips <- glmmTMB(
+    sips ~ water + period + (1 | group) + (1 | group:period) + (1 | animal_id) + (1 | day),
+    data   = drinking,
+    family = nbinom2
+  )
+  log_tmb(model_sips, "model_sips (NB2)")
+  sips_family <- "negative binomial (glmmTMB, nbinom2)"
+} else {
+  model_sips  <- model_sips_pois
+  sips_family <- "Poisson (glmer)"
+}
+
+tibble(
+  Metric = c("Pearson chi-square (Poisson)", "Residual df", "Dispersion ratio",
+             "p-value (overdispersion)", "Model reported"),
+  Value  = c(round(overdisp_sips["chisq"], 2), round(overdisp_sips["rdf"], 0),
+             round(overdisp_sips["ratio"], 3), formatC(overdisp_sips["p"], format = "e", digits = 2),
+             sips_family)
+) %>%
+  kbl(caption = "Table 38a. Dispersion diagnostics — sips per event.") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+
+sips_emm <- emm_response_table(model_sips, "water")
+
+sips_emm$means %>%
+  rename(`Water group` = Level, `Mean sips / event` = Response) %>%
+  kbl(caption = "Table 39. Back-transformed estimated marginal means — sips per event by water group.",
+      digits = 2) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+
+sips_emm$contrasts %>%
+  rename(`Rate ratio` = Ratio) %>%
+  kbl(caption = "Table 40. Contrast — sips per event W+ / W− (rate ratio).", digits = 4) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+```
+
+```{r}
+#| code-summary: "Sips per event — boxplot + jitter by treatment"
+#| fig-cap: "Figure 21. Sips per drinking event by treatment."
+
+p_sips <- ggplot(drinking,
+                 aes(x = treatment, y = sips, fill = treatment)) +
+  geom_boxplot(alpha = 0.7, outlier.shape = NA) +
+  geom_jitter(width = 0.15, alpha = 0.3, size = 1.2) +
+  scale_fill_manual(values = pal_treatment) +
+  labs(x = "Treatment", y = "Sips per event") +
+  theme_ws() +
+  theme(legend.position = "none")
+
+ggplotly(p_sips, tooltip = c("x", "y"))
+```
+
+### Sip rate
+
+```{r}
+#| code-summary: "LMM — sip rate by water group"
+
+model_sip_rate <- fit_mm(
+  sip_rate_s ~ water + period + (1 | group) + (1 | group:period) + (1 | animal_id) + (1 | day),
+  data = drinking, label = "model_sip_rate"
+)
+
+sip_rate_emm <- emm_table(model_sip_rate, "water")
+
+sip_rate_emm$means %>%
+  rename(`Water group` = Level, `Mean sip rate (sips/s)` = Mean) %>%
+  kbl(caption = "Table 41. Estimated marginal means — sip rate by water group.",
+      digits = 3) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+
+sip_rate_emm$contrasts %>%
+  kbl(caption = "Table 42. Contrast — sip rate W+ vs W−.", digits = 4) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+```
+
+```{r}
+#| code-summary: "Sip rate — boxplot + jitter by treatment"
+#| fig-cap: "Figure 22. Sip rate (sips/s) by treatment."
+
+p_sip_rate <- ggplot(drinking,
+                     aes(x = treatment, y = sip_rate_s, fill = treatment)) +
+  geom_boxplot(alpha = 0.7, outlier.shape = NA) +
+  geom_jitter(width = 0.15, alpha = 0.3, size = 1.2) +
+  scale_fill_manual(values = pal_treatment) +
+  labs(x = "Treatment", y = "Sip rate (sips / s)") +
+  theme_ws() +
+  theme(legend.position = "none")
+
+ggplotly(p_sip_rate, tooltip = c("x", "y"))
+```
+
+:::
+
+# 6 · Shade Area Use (S+ Treatments)
+
+Animals in S+ treatments had access to a silvopastoral area. Behavioral scans recorded each animal's location as shade (under tree canopy), sun between trees (silvopastoral area, not directly shaded), or sun (open pasture).
+
+Note: Following the reviewer recommendation, the 12:00h observation was excluded from the analysis for **both** S+ treatments to avoid confounding with the scheduled watering removal of S+W− animals at that timepoint. The same applies to the 17:00h scan block, which contains the second watering window (17:30–18:00h): see the check below.
+
+```{r}
+#| code-summary: "Check — how S+W− animals are coded during the watering windows"
+
+# W− animals were taken to the trough corridor at 12:00 and 17:30–18:00.
+# The ethogram has no "corridor" location, so scans taken there can only be
+# coded as sun or shade. Drinking events confirm when the W− groups drank.
+watering_hours <- drinking %>%
+  filter(water == "W-") %>%
+  count(hour = as.integer(as.character(hour)), name = "w_minus_events") %>%
+  slice_max(w_minus_events, n = 2) %>%
+  pull(hour) %>% sort()
+
+loc_check <- behavior_raw %>%
+  filter(treatment %in% c("S+W+", "S+W-"), hour <= 12,
+         location %in% c("sun", "shade", "sun_between_trees")) %>%
+  group_by(treatment, hour, clock_time) %>%
+  summarise(
+    shade = sum(total[location == "shade"], na.rm = TRUE),
+    sun   = sum(total[location != "shade"], na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(prop_shade = shade / (shade + sun)) %>%
+  select(treatment, hour, clock_time, prop_shade, sun) %>%
+  pivot_wider(names_from = treatment, values_from = c(prop_shade, sun)) %>%
+  mutate(diff = `prop_shade_S+W-` - `prop_shade_S+W+`)
+
+loc_check %>%
+  mutate(
+    across(starts_with("prop_shade"), ~ scales::percent(., accuracy = 0.1)),
+    diff = round(diff * 100, 1),
+    `W− watering` = if_else(hour %in% watering_hours, "yes", "")
+  ) %>%
+  select(Time = clock_time, `Shade S+W+` = `prop_shade_S+W+`, `Shade S+W−` = `prop_shade_S+W-`,
+         `Sun scans S+W+` = `sun_S+W+`, `Sun scans S+W−` = `sun_S+W-`,
+         `S+W− − S+W+ (pp)` = diff, `W− watering`) %>%
+  kbl(caption = "Table 42a. Daytime shade use of S+ animals by scan block (all scans), with the blocks in which the W− groups drank.") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+
+# Scan blocks excluded from the shade-use model for both S+ treatments
+shade_excluded_hours <- watering_hours
+diff_noon <- round(loc_check$diff[loc_check$hour == watering_hours[1]] * 100, 1)
+diff_pm   <- round(loc_check$diff[loc_check$hour == watering_hours[2]] * 100, 1)
+diff_rest <- round(mean(loc_check$diff[!loc_check$hour %in% watering_hours]) * 100, 1)
+```
+
+W− animals drank in the `r clock_labels[watering_hours[1]]`h and `r clock_labels[watering_hours[2]]`h scan blocks (Table 42a). Because the ethogram has no corridor category, S+W− animals in the corridor were recorded as being in the sun: their shade use differed from S+W+ by `r diff_noon` percentage points at `r clock_labels[watering_hours[1]]`h and by `r diff_pm` points at `r clock_labels[watering_hours[2]]`h, against an average of `r diff_rest` points in the other daytime blocks. Both blocks (`r paste0(clock_labels[shade_excluded_hours], "h", collapse = " and ")`) are therefore excluded from the shade-use model for **both** S+ treatments. The scans are hourly totals, so the corridor scans cannot be separated from the rest of the block.
+
+## 6.1 · Location Distribution Over Time
+
+```{r}
+#| code-summary: "Location use — scan distribution by treatment (daytime)"
+
+shade_loc_tbl <- behavior_raw %>%
+  filter(
+    treatment %in% c("S+W+", "S+W-"),
+    location  %in% c("sun", "shade", "sun_between_trees"),
+    hour <= 12
+  ) %>%
+  group_by(treatment, location) %>%
+  summarise(total_scans = sum(total, na.rm = TRUE), .groups = "drop") %>%
+  group_by(treatment) %>%
+  mutate(
+    `Proportion (%)` = round(total_scans / sum(total_scans) * 100, 1),
+    location = recode(location,
+      "shade"             = "Shade",
+      "sun_between_trees" = "Sun between trees",
+      "sun"               = "Sun")
+  ) %>%
+  ungroup() %>%
+  rename(Treatment = treatment, Location = location, Scans = total_scans)
+
+shade_loc_tbl %>%
+  kbl(caption = "Table 43. Daytime scan distribution (%) by location for S+ treatments.") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+```
+
+```{r}
+#| code-summary: "Location use — stacked area plot with watering marker"
+#| fig-cap: "Figure 23. Proportion of daytime scans by location for S+ treatments. Red dashed line marks 12:00h."
+
+shade_use <- behavior_raw %>%
+  filter(
+    treatment %in% c("S+W+", "S+W-"),
+    location  %in% c("sun", "shade", "sun_between_trees"),
+    hour <= 12
+  ) %>%
+  group_by(treatment, hour, clock_time, location) %>%
+  summarise(total_scans = sum(total, na.rm = TRUE), .groups = "drop") %>%
+  group_by(treatment, hour, clock_time) %>%
+  mutate(
+    prop       = total_scans / sum(total_scans),
+    clock_time = factor(clock_time, levels = day_labels)
+  ) %>%
+  ungroup()
+
+p_shade_loc <- ggplot(shade_use,
+                      aes(x = clock_time, y = prop,
+                          fill = location, group = location)) +
+  geom_area(position = "fill", alpha = 0.85) +
+  geom_vline(xintercept = 6, linetype = "dashed",
+             color = "#CC0000", linewidth = 1) +
+  annotate("text", x = 6.2, y = 0.5, hjust = 0, size = 3,
+           color = "#CC0000", label = "12:00h") +
+  scale_fill_manual(
+    values = pal_location,
+    labels = c("Sun", "Shade", "Sun between trees")
+  ) +
+  scale_y_continuous(labels = scales::percent) +
+  facet_wrap(~ treatment) +
+  labs(x = "Clock time (daytime)",
+       y = "Proportion of scans", fill = "Location") +
+  theme_ws(angle_x = 45)
+
+print(p_shade_loc)
+```
+
+## 6.2 · Statistical Analysis of Shade Use
+
+```{r}
+#| include: false
+
+shade_model_data <- behavior_raw %>%
+  filter(
+    treatment %in% c("S+W+", "S+W-"),
+    location  %in% c("sun", "shade", "sun_between_trees"),
+    hour <= 12,
+    !hour %in% shade_excluded_hours  # exclude 12:00h and 17:00h (W− watering) for BOTH treatments
+  ) %>%
+  group_by(treatment, group, animal_id, period, day, hour) %>%
+  summarise(
+    shade_scans = sum(total[location == "shade"], na.rm = TRUE),
+    all_scans   = sum(total, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  filter(all_scans > 0) %>%
+  mutate(
+    prop_shade = shade_scans / all_scans,
+    treatment  = factor(treatment, levels = c("S+W+", "S+W-")),
+    day        = as.factor(day),
+    hour       = as.factor(hour)
+  )
+```
+
+```{r}
+#| code-summary: "LMM — proportion of time in shade: S+W+ vs S+W−"
+
+model_shade_prop <- fit_mm(
+  prop_shade ~ treatment + period + (1 | group) + (1 | group:period) + (1 | animal_id) + (1 | day / hour),
+  data = shade_model_data, label = "model_shade_prop"
+)
+
+shade_prop_emm <- emm_table(model_shade_prop, "treatment")
+
+shade_prop_emm$means %>%
+  rename(Treatment = Level, `Mean prop. in shade` = Mean) %>%
+  kbl(caption = "Table 44. Estimated marginal means — proportion of time in shade.",
+      digits = 3) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+
+shade_prop_emm$contrasts %>%
+  kbl(caption = "Table 45. Contrast — proportion of time in shade: S+W+ vs S+W−.",
+      digits = 4) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+```
+
+```{r}
+#| code-summary: "Proportion of time in shade — hourly line plot by treatment"
+#| fig-cap: "Figure 24. Mean proportion of daytime scans in shade by hour (S+ treatments). Ribbons = ±1 SD. Red dashed lines mark the W− watering blocks (12:00h and 17:00h), excluded from the analysis for both treatments."
+
+shade_hour <- shade_model_data %>%
+  mutate(hour_int = as.integer(as.character(hour))) %>%
+  group_by(treatment, hour_int) %>%
+  summarise(
+    mean = mean(prop_shade, na.rm = TRUE),
+    sd   = sd(prop_shade,   na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(clock = factor(scan_to_clock(hour_int), levels = day_labels))
+
+p_shade_prop <- ggplot(shade_hour,
+                       aes(x = clock, y = mean,
+                           color = treatment, fill = treatment,
+                           group = treatment)) +
+  geom_ribbon(aes(ymin = pmax(mean - sd, 0), ymax = pmin(mean + sd, 1)),
+              alpha = 0.15, color = NA) +
+  geom_vline(xintercept = shade_excluded_hours, linetype = "dashed",
+             color = "#CC0000", linewidth = 0.9) +
+  annotate("text", x = shade_excluded_hours + 0.15, y = 0.9, hjust = 0, size = 3,
+           color = "#CC0000", label = "watering") +
+  geom_line(linewidth = 1.2) +
+  geom_point(size = 2.5) +
+  scale_color_manual(values = c("S+W+" = "#2C4A2E", "S+W-" = "#4A7FA5")) +
+  scale_fill_manual( values = c("S+W+" = "#2C4A2E", "S+W-" = "#4A7FA5")) +
+  scale_y_continuous(labels = scales::percent, limits = c(0, 1)) +
+  scale_x_discrete(drop = FALSE) +
+  labs(x = "Clock time", y = "Proportion of scans in shade",
+       color = "Treatment", fill = "Treatment") +
+  theme_ws(angle_x = 45)
+
+ggplotly(p_shade_prop, tooltip = c("x", "y", "color")) %>%
+  layout(legend = list(orientation = "h", x = 0.25, y = -0.25))
+```
+
+# 7 · Shade × Water Factorial Models
+
+The four treatments form a 2 × 2 factorial (shade S+/S− × water W+/W−). The models below re-express the same comparisons as main effects of shade and water and their interaction, with the same random structure as the treatment models:
+
+`y ~ shade * water + period + (1 | group) + (1 | group:period) + (1 | animal_id) + (1 | day/hour)`
+
+Shade use is measured only in S+ animals and is therefore not included. Water intake is a group-day measure (no animal term), and the drinking bout models use `(1 | day)`; drinking events and sips per event use the same count families as in Section 5. *F* tests come from `emmeans::joint_tests()` (Satterthwaite df for LMMs; asymptotic df for GLMMs).
+
+```{r}
+#| code-summary: "Factorial models — shade × water for all outcomes"
+
+re_beh  <- "+ period + (1 | group) + (1 | group:period) + (1 | animal_id) + (1 | day / hour)"
+re_drk  <- "+ period + (1 | group) + (1 | group:period) + (1 | animal_id) + (1 | day)"
+
+fact_specs <- tribble(
+  ~key,              ~Outcome,                ~Daypart,    ~data,            ~resp,
+  "graz_day",        "Grazing",               "Daytime",   "behavior_day",   "grazing",
+  "other_day",       "Other",                 "Daytime",   "behavior_day",   "other",
+  "lying_day",       "Lying",                 "Daytime",   "behavior_day",   "lying",
+  "rum_day",         "Ruminating",            "Daytime",   "behavior_day",   "ruminating_tot",
+  "stand_day",       "Standing",              "Daytime",   "behavior_day",   "standing",
+  "graz_night",      "Grazing",               "Nighttime", "behavior_night", "grazing",
+  "other_night",     "Other",                 "Nighttime", "behavior_night", "other",
+  "lying_night",     "Lying",                 "Nighttime", "behavior_night", "lying",
+  "rum_night",       "Ruminating",            "Nighttime", "behavior_night", "ruminating_tot",
+  "stand_night",     "Standing",              "Nighttime", "behavior_night", "standing"
+)
+
+fact_models <- list()
+for (i in seq_len(nrow(fact_specs))) {
+  s <- fact_specs[i, ]
+  fact_models[[s$key]] <- fit_mm(
+    as.formula(paste(s$resp, "~ shade * water", re_beh)),
+    data = get(s$data), label = paste0("factorial_", s$key)
+  )
+}
+
+fact_models[["events"]] <- fit_mm(
+  as.formula(paste("events ~ shade * water", re_drk)),
+  data = events, family = poisson, label = "factorial_events (Poisson)"
+)
+
+fact_models[["intake"]] <- fit_mm(
+  intake_per_animal ~ shade * water + period + (1 | group) + (1 | group:period),
+  data = intake, label = "factorial_intake"
+)
+
+fact_models[["duration"]] <- fit_mm(
+  as.formula(paste("log(drinking_time_s) ~ shade * water", re_drk)),
+  data = drinking, label = "factorial_duration (log)"
+)
+
+if (sips_overdispersed) {
+  fact_models[["sips"]] <- glmmTMB(
+    as.formula(paste("sips ~ shade * water", re_drk)),
+    data = drinking, family = nbinom2
+  )
+  log_tmb(fact_models[["sips"]], "factorial_sips (NB2)")
+} else {
+  fact_models[["sips"]] <- fit_mm(
+    as.formula(paste("sips ~ shade * water", re_drk)),
+    data = drinking, family = poisson, label = "factorial_sips (Poisson)"
+  )
+}
+
+fact_models[["sip_rate"]] <- fit_mm(
+  as.formula(paste("sip_rate_s ~ shade * water", re_drk)),
+  data = drinking, label = "factorial_sip_rate"
+)
+
+fact_specs <- bind_rows(
+  fact_specs,
+  tribble(
+    ~key,       ~Outcome,                         ~Daypart,
+    "events",   "Drinking events / day (Poisson)", "24 h",
+    "intake",   "Water intake (L/animal/day)",     "24 h",
+    "duration", "Drinking duration (log s)",       "24 h",
+    "sips",     paste0("Sips per event (", if (sips_overdispersed) "NB2" else "Poisson", ")"), "24 h",
+    "sip_rate", "Sip rate (sips/s)",               "24 h"
+  )
+)
+
+# ── joint_tests() for shade, water and shade:water ────────────────────────────
+fact_jt <- map_dfr(fact_specs$key, function(k) {
+  jt <- as.data.frame(joint_tests(fact_models[[k]]))
+  jt %>%
+    filter(`model term` %in% c("shade", "water", "shade:water")) %>%
+    transmute(key = k, term = `model term`, df1, df2, F = F.ratio, p = p.value)
+}) %>%
+  left_join(fact_specs %>% select(key, Outcome, Daypart), by = "key")
+
+fmt_F <- function(F, df1, df2) {
+  df2_txt <- ifelse(is.infinite(df2), "∞", formatC(df2, format = "f", digits = 1))
+  paste0("F(", df1, ", ", df2_txt, ") = ", formatC(F, format = "f", digits = 2))
+}
+
+fact_summary <- fact_jt %>%
+  mutate(
+    cell = paste0(fmt_F(F, df1, df2), "; p ",
+                  ifelse(p < 0.001, "< 0.001", paste("=", formatC(p, format = "f", digits = 3))))
+  ) %>%
+  select(key, Outcome, Daypart, term, cell) %>%
+  pivot_wider(names_from = term, values_from = cell) %>%
+  select(Outcome, Daypart, Shade = shade, Water = water, `Shade × Water` = `shade:water`)
+
+fact_summary %>%
+  kbl(caption = "Table 46. Shade × water factorial models — joint tests (F and p) for shade, water and their interaction.") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE) %>%
+  row_spec(which(fact_jt$p[fact_jt$term == "shade:water"] < 0.10), bold = TRUE) %>%
+  footnote(general = "Rows in bold have a shade × water interaction with p < 0.10; their simple effects are shown in Table 47.")
+```
+
+```{r}
+#| code-summary: "Simple effects where the shade × water interaction is p < 0.10"
+
+int_keys <- fact_jt %>% filter(term == "shade:water", p < 0.10) %>% pull(key)
+
+simple_effects <- map_dfr(int_keys, function(k) {
+  m <- fact_models[[k]]
+  is_resp <- k %in% c("events", "duration", "sips")
+  one <- function(spec, by) {
+    pr <- as.data.frame(pairs(emmeans(m, spec, type = if (is_resp) "response" else "link")))
+    est_col <- intersect(c("ratio", "estimate"), names(pr))[1]
+    stat    <- intersect(c("t.ratio", "z.ratio"), names(pr))[1]
+    tibble(
+      key        = k,
+      Effect     = paste0(pr$contrast, " | ", by, " = ", pr[[by]]),
+      Scale      = if (is_resp) "ratio" else "difference",
+      Estimate   = pr[[est_col]],
+      SE         = pr$SE,
+      `t / z`    = pr[[stat]],
+      `p-value`  = pr$p.value
+    )
+  }
+  bind_rows(one(~ shade | water, "water"), one(~ water | shade, "shade"))
+})
+
+if (nrow(simple_effects)) {
+  simple_effects %>%
+    left_join(fact_specs %>% select(key, Outcome, Daypart), by = "key") %>%
+    select(Outcome, Daypart, Effect, Scale, Estimate, SE, `t / z`, `p-value`) %>%
+    mutate(across(where(is.numeric), ~ round(., 4))) %>%
+    kbl(caption = "Table 47. Simple effects — shade within water level and water within shade level (outcomes with interaction p < 0.10).") %>%
+    kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+    row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+} else {
+  cat("No outcome had a shade × water interaction with p < 0.10.")
+}
+```
+
+# 8 · Experimental-Unit Sensitivity Analysis
+
+Treatments were applied to whole groups for a whole period, so the 16 group × period cells are the true experimental units. As a check on the mixed models, every behavior, drinking and intake outcome was averaged to one value per group × period and analysed as a classic 4 × 4 Latin square:
+
+`y ~ treatment + period + group` (lm; 15 − 9 = 6 error df), and `y ~ shade * water + period + group` (same 6 error df).
+
+Cell means are the mean of all observations in the cell (animal-hours for behavior; animal-days for drinking events; group-days for intake; drinking bouts for duration, sips and sip rate). Duration is averaged on the log scale, as in the mixed model. Because treatment is orthogonal to group and period in a Latin square, sequential and adjusted *F* tests are identical.
+
+```{r}
+#| code-summary: "Latin-square ANOVA on group × period means (16 values per outcome)"
+
+ls_specs <- tribble(
+  ~key,          ~data,            ~resp,
+  "graz_day",    "behavior_day",   "grazing",
+  "other_day",   "behavior_day",   "other",
+  "lying_day",   "behavior_day",   "lying",
+  "rum_day",     "behavior_day",   "ruminating_tot",
+  "stand_day",   "behavior_day",   "standing",
+  "graz_night",  "behavior_night", "grazing",
+  "other_night", "behavior_night", "other",
+  "lying_night", "behavior_night", "lying",
+  "rum_night",   "behavior_night", "ruminating_tot",
+  "stand_night", "behavior_night", "standing",
+  "events",      "events",         "events",
+  "intake",      "intake",         "intake_per_animal",
+  "duration",    "drinking",       "log(drinking_time_s)",
+  "sips",        "drinking",       "sips",
+  "sip_rate",    "drinking",       "sip_rate_s"
+)
+
+# One mean per group × period (the experimental unit)
+gp_means <- function(data, resp) {
+  get(data) %>%
+    mutate(.y = !!rlang::parse_expr(resp)) %>%
+    group_by(group, period, treatment, shade, water) %>%
+    summarise(y = mean(.y, na.rm = TRUE), .groups = "drop")
+}
+
+ls_p <- map_dfr(seq_len(nrow(ls_specs)), function(i) {
+  s  <- ls_specs[i, ]
+  gp <- gp_means(s$data, s$resp)
+  a_trt  <- anova(lm(y ~ period + group + treatment, data = gp))
+  a_fact <- anova(lm(y ~ period + group + shade * water, data = gp))
+  tibble(
+    key        = s$key,
+    n_units    = nrow(gp),
+    df_error   = a_trt["Residuals", "Df"],
+    ls_trt     = a_trt["treatment", "Pr(>F)"],
+    ls_shade   = a_fact["shade", "Pr(>F)"],
+    ls_water   = a_fact["water", "Pr(>F)"],
+    ls_int     = a_fact["shade:water", "Pr(>F)"]
+  )
+})
+
+# Mixed-model counterparts: treatment F (behavior treatment models) and the
+# factorial joint tests (Table 46)
+trt_models <- list(
+  graz_day    = model_graz_day_trat,    other_day   = model_other_day_trat,
+  lying_day   = model_lying_day_trat,   rum_day     = model_rum_day_trat,
+  stand_day   = model_stand_day_trat,   graz_night  = model_graze_night_trat,
+  other_night = model_other_night_trat, lying_night = model_lying_night_trat,
+  rum_night   = model_rum_night_trat,   stand_night = model_stand_night_trat
+)
+trt_labels <- c(graz_night = "model_graze_night_trat")
+
+mm_p <- fact_jt %>%
+  select(key, term, p) %>%
+  pivot_wider(names_from = term, values_from = p) %>%
+  transmute(key, mm_shade = shade, mm_water = water, mm_int = `shade:water`) %>%
+  left_join(
+    tibble(key = names(trt_models),
+           mm_trt = map_dbl(trt_models, ~ anova(.)["treatment", "Pr(>F)"])),
+    by = "key"
+  )
+
+# group:period variance ≈ 0 in the treatment or factorial mixed model
+gp_zero_models <- model_log$model[str_detect(model_log$action, "group:period variance ≈ 0")]
+gp_zero <- map_lgl(ls_specs$key, function(k) {
+  trt_lab <- if (k %in% names(trt_labels)) trt_labels[[k]] else paste0("model_", k, "_trat")
+  any(str_detect(gp_zero_models, fixed(paste0("factorial_", k)))) ||
+    trt_lab %in% gp_zero_models ||
+    (k == "events" && "model_events (Poisson)" %in% gp_zero_models) ||
+    (k == "intake" && "model_intake" %in% gp_zero_models)
+})
+
+eu_compare <- ls_p %>%
+  left_join(mm_p, by = "key") %>%
+  mutate(gp_zero = gp_zero[match(key, ls_specs$key)]) %>%
+  left_join(fact_specs %>% select(key, Outcome, Daypart), by = "key")
+
+# Significance (at 0.05) that differs between the two analyses
+eu_flips <- eu_compare %>%
+  select(key, Outcome, Daypart, gp_zero, ls_trt:ls_int, mm_shade:mm_trt) %>%
+  pivot_longer(c(starts_with("ls_"), starts_with("mm_")),
+               names_to = c("method", "term"), names_sep = "_") %>%
+  pivot_wider(names_from = method, values_from = value) %>%
+  filter(!is.na(mm), !is.na(ls), (mm < 0.05) != (ls < 0.05)) %>%
+  mutate(term = recode(term, trt = "Treatment", shade = "Shade", water = "Water",
+                       int = "Shade × Water"))
+
+p_cell <- function(x) ifelse(is.na(x), "—", ifelse(x < 0.001, "< 0.001", formatC(x, format = "f", digits = 3)))
+
+eu_compare %>%
+  transmute(
+    Outcome = paste0(Outcome, if_else(gp_zero, " †", "")), Daypart,
+    `Treatment: LS` = p_cell(ls_trt), `Treatment: MM` = p_cell(mm_trt),
+    `Shade: LS` = p_cell(ls_shade),   `Shade: MM` = p_cell(mm_shade),
+    `Water: LS` = p_cell(ls_water),   `Water: MM` = p_cell(mm_water),
+    `S × W: LS` = p_cell(ls_int),     `S × W: MM` = p_cell(mm_int)
+  ) %>%
+  kbl(caption = "Table 47a. P-values from the Latin-square ANOVA on group × period means (LS; 16 units, 6 error df) and from the mixed models (MM; treatment F from the treatment models, shade/water/interaction from Table 46).") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE) %>%
+  row_spec(which(eu_compare$gp_zero), bold = TRUE) %>%
+  footnote(general = c(
+    paste0("† Bold rows: the group:period variance was estimated as ≈ 0 in the treatment and/or factorial mixed model, ",
+           "so its denominator df default to the observation level and its tests are liberal; the LS column is the more conservative test."),
+    "MM treatment F is available only for the behavior outcomes; the drinking outcomes were modelled by water (Section 5) and in the factorial models."
+  ))
+```
+
+```{r}
+#| code-summary: "Tests whose significance at 0.05 differs between the two analyses"
+
+if (nrow(eu_flips)) {
+  eu_flips %>%
+    transmute(Outcome = paste0(Outcome, if_else(gp_zero, " †", "")), Daypart,
+              Term = term, `p (LS, group × period)` = p_cell(ls), `p (mixed model)` = p_cell(mm)) %>%
+    kbl(caption = "Table 47b. Tests significant at 0.05 in one analysis but not the other.") %>%
+    kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+    row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+} else {
+  cat("All tests agree at the 0.05 level.")
+}
+```
+
+# 9 · Model Fitting Notes and Residual Diagnostics
+
+## 9.1 · Convergence and singularity
+
+Every animal-level model includes `(1 | group:period)`, because group × period (16 units) is the experimental unit. Models that did not converge or were singular were refitted with the `bobyqa` optimizer; if still singular, random terms with zero variance were dropped (never `group:period`).
+
+```{r}
+#| code-summary: "Convergence / singularity log for all LMMs and GLMMs"
+
+model_log %>%
+  rename(Model = model, Status = status, Action = action, `Final random-effect variances` = final) %>%
+  kbl(caption = "Table 48. Convergence and singularity checks for all fitted models.") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+```
+
+## 9.2 · Residual diagnostics
+
+::: {.callout-note collapse="true" title="Residual diagnostics (click to expand)"}
+
+```{r}
+#| code-summary: "LMMs — residuals vs fitted values"
+#| fig-cap: "Figure 25. Residuals vs fitted values for the main LMMs."
+#| fig-width: 11
+#| fig-height: 9
+
+diag_lmms <- list(
+  "Grazing (day)"          = model_graz_day_trat,
+  "Other (day)"            = model_other_day_trat,
+  "Lying (day)"            = model_lying_day_trat,
+  "Ruminating (day)"       = model_rum_day_trat,
+  "Standing (day)"         = model_stand_day_trat,
+  "Grazing (night)"        = model_graze_night_trat,
+  "Other (night)"          = model_other_night_trat,
+  "Lying (night)"          = model_lying_night_trat,
+  "Ruminating (night)"     = model_rum_night_trat,
+  "Standing (night)"       = model_stand_night_trat,
+  "Shade use (prop.)"      = model_shade_prop,
+  "Water intake"           = model_intake,
+  "log drinking duration"  = model_drink_time,
+  "Sip rate"               = model_sip_rate
+)
+
+diag_df <- imap_dfr(diag_lmms, ~ tibble(model = .y, fitted = fitted(.x), resid = resid(.x))) %>%
+  mutate(model = factor(model, levels = names(diag_lmms)))
+
+ggplot(diag_df, aes(fitted, resid)) +
+  geom_hline(yintercept = 0, color = "#6B6B6B", linetype = "dashed") +
+  geom_point(alpha = 0.15, size = 0.6, color = "#2C4A2E") +
+  geom_smooth(method = "loess", formula = y ~ x, se = FALSE, color = "#C8A84B", linewidth = 0.8) +
+  facet_wrap(~ model, scales = "free", ncol = 4) +
+  labs(x = "Fitted", y = "Residual") +
+  theme_ws()
+```
+
+```{r}
+#| code-summary: "LMMs — normal QQ plots of residuals"
+#| fig-cap: "Figure 26. Normal QQ plots of the residuals of the main LMMs."
+#| fig-width: 11
+#| fig-height: 9
+
+ggplot(diag_df, aes(sample = resid)) +
+  stat_qq(alpha = 0.2, size = 0.6, color = "#2C4A2E") +
+  stat_qq_line(color = "#C8A84B") +
+  facet_wrap(~ model, scales = "free", ncol = 4) +
+  labs(x = "Theoretical quantiles", y = "Sample quantiles") +
+  theme_ws()
+```
+
+```{r}
+#| code-summary: "GLMMs — DHARMa simulated residuals (drinking events)"
+#| fig-cap: "Figure 27. DHARMa simulated-residual diagnostics for the Poisson GLMM of daily drinking events."
+#| fig-width: 10
+#| fig-height: 4.5
+
+set.seed(2024)
+dharma_events <- simulateResiduals(model_events, n = 1000)
+plot(dharma_events)
+```
+
+```{r}
+#| code-summary: "GLMMs — DHARMa dispersion and zero-inflation tests (drinking events)"
+
+dharma_tests <- function(sim, label) {
+  disp <- testDispersion(sim, plot = FALSE)
+  zi   <- testZeroInflation(sim, plot = FALSE)
+  unif <- testUniformity(sim, plot = FALSE)
+  tibble(
+    Model = label,
+    `Dispersion ratio (sim.)` = round(unname(disp$statistic), 3),
+    `p (dispersion)`          = round(disp$p.value, 4),
+    `Zero-inflation ratio`    = round(unname(zi$statistic), 3),
+    `p (zero-inflation)`      = round(zi$p.value, 4),
+    `p (KS uniformity)`       = round(unif$p.value, 4)
+  )
+}
+
+dharma_tbl <- dharma_tests(dharma_events, "Drinking events (Poisson)")
+
+if (events_underdispersed) {
+  set.seed(2024)
+  dharma_events_gp <- simulateResiduals(model_events_gp, n = 1000)
+  dharma_tbl <- bind_rows(dharma_tbl, dharma_tests(dharma_events_gp, "Drinking events (generalized Poisson)"))
+}
+```
+
+```{r}
+#| code-summary: "GLMMs — DHARMa simulated residuals (sips per event)"
+#| fig-cap: "Figure 28. DHARMa simulated-residual diagnostics for the GLMM of sips per drinking event."
+#| fig-width: 10
+#| fig-height: 4.5
+
+set.seed(2024)
+dharma_sips <- simulateResiduals(model_sips, n = 1000)
+plot(dharma_sips)
+
+dharma_tbl <- bind_rows(dharma_tbl, dharma_tests(dharma_sips, paste("Sips per event —", sips_family)))
+
+dharma_tbl %>%
+  kbl(caption = "Table 49. DHARMa tests on simulated residuals for the count GLMMs.") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+```
+
+:::
+
+::: {.callout-note}
+**Next: Results section (paper format)**
+:::
+
+# Results
+
+```{r}
+#| include: false
+#| code-summary: "Prepare values and CLD letters for the Results section"
+
+get_emm <- function(emm, level) round(emm$means$Mean[emm$means$Level == level], 3)
+
+get_p <- function(emm, idx = 1) fmt_p(emm$contrasts$`p-value`[idx])
+
+# Omnibus F test for treatment (Satterthwaite) from a treatment model
+get_trt_p <- function(model) anova(model)["treatment", "Pr(>F)"]
+
+get_cld <- function(model, factor) {
+  emm <- emmeans(model, as.formula(paste("~", factor)))
+  cld_df <- multcomp::cld(emm, Letters = letters, adjust = "tukey", reversed = TRUE)
+  cld_df <- as.data.frame(cld_df)
+  nms <- names(cld_df)
+  data.frame(
+    Level   = cld_df[[nms[1]]],
+    Letters = trimws(cld_df[[nms[length(nms)]]])
+  )
+}
+
+# ── Descriptive statistics (mean ± SD per treatment × daypart) ────────────────
+budget_desc <- behavior %>%
+  group_by(treatment, daypart, animal_id) %>%
+  summarise(
+    n_scans = sum(total, na.rm = TRUE),
+    across(c(grazing, other, lying, ruminating_tot, standing), ~ sum(., na.rm = TRUE)),
+    .groups = "drop"
+  ) %>%
+  mutate(across(grazing:standing, ~ . / n_scans * 100)) %>%
+  group_by(treatment, daypart) %>%
+  summarise(
+    across(c(grazing, other, lying, ruminating_tot, standing),
+           list(mean = ~ mean(.), sd = ~ sd(.)),
+           .names = "{.col}_{.fn}"),
+    n_obs = n(),
+    .groups = "drop"
+  )
+
+# ── CLD letters per treatment for each behavior × daypart ─────────────────────
+cld_graz_day    <- get_cld(model_graz_day_trat,    "treatment")
+cld_other_day   <- get_cld(model_other_day_trat,   "treatment")
+cld_lying_day   <- get_cld(model_lying_day_trat,   "treatment")
+cld_rum_day     <- get_cld(model_rum_day_trat,     "treatment")
+cld_stand_day   <- get_cld(model_stand_day_trat,   "treatment")
+
+cld_graz_night  <- get_cld(model_graze_night_trat, "treatment")
+cld_other_night <- get_cld(model_other_night_trat, "treatment")
+cld_lying_night <- get_cld(model_lying_night_trat, "treatment")
+cld_rum_night   <- get_cld(model_rum_night_trat,   "treatment")
+cld_stand_night <- get_cld(model_stand_night_trat, "treatment")
+
+# ── Omnibus treatment p-values (F test, Satterthwaite) ────────────────────────
+trt_p <- c(
+  graz_day    = get_trt_p(model_graz_day_trat),
+  other_day   = get_trt_p(model_other_day_trat),
+  lying_day   = get_trt_p(model_lying_day_trat),
+  rum_day     = get_trt_p(model_rum_day_trat),
+  stand_day   = get_trt_p(model_stand_day_trat),
+  graz_night  = get_trt_p(model_graze_night_trat),
+  other_night = get_trt_p(model_other_night_trat),
+  lying_night = get_trt_p(model_lying_night_trat),
+  rum_night   = get_trt_p(model_rum_night_trat),
+  stand_night = get_trt_p(model_stand_night_trat)
+)
+trt_p_text <- fmt_p(trt_p)
+names(trt_p_text) <- names(trt_p)
+
+# ── Overall p-values for main effects ─────────────────────────────────────────
+graz_p_shade  <- get_p(graz_day_shade_emm)
+graz_p_water  <- get_p(graz_day_water_emm)
+lying_p_shade <- get_p(lying_day_shade_emm)
+lying_p_water <- get_p(lying_day_water_emm)
+rum_p_shade   <- get_p(rum_day_shade_emm)
+rum_p_water   <- get_p(rum_day_water_emm)
+stand_p_shade <- get_p(stand_day_shade_emm)
+stand_p_water <- get_p(stand_day_water_emm)
+other_p_shade <- get_p(other_day_shade_emm)
+other_p_water <- get_p(other_day_water_emm)
+ngraz_p_shade <- get_p(graze_night_shade_emm)
+ngraz_p_water <- get_p(graze_night_water_emm)
+
+# Pairwise p for a pair of treatments from an emm_table() result
+pair_p <- function(emm, a, b) {
+  cmp <- emm$contrasts$Comparison
+  emm$contrasts$`p-value`[cmp %in% c(paste(a, "-", b), paste(b, "-", a))]
+}
+
+# ── Shade use ─────────────────────────────────────────────────────────────────
+prop_spwp <- round(get_emm(shade_prop_emm, "S+W+"), 3)
+prop_spwm <- round(get_emm(shade_prop_emm, "S+W-"), 3)
+shade_p   <- shade_prop_emm$contrasts$`p-value`[1]
+shade_p_text <- fmt_p(shade_p)
+
+# ── Drinking events, intake, bout characteristics ─────────────────────────────
+events_rate_wp <- round(emm_events_df$Rate[emm_events_df$`Water group` == "W+"], 2)
+events_rate_wm <- round(emm_events_df$Rate[emm_events_df$`Water group` == "W-"], 2)
+events_rr      <- round(cont_events_df$`Rate ratio`[1], 2)
+events_p       <- cont_events_df$`p-value`[1]
+events_p_text  <- fmt_p(events_p)
+events_n_zero  <- sum(events$events == 0)
+
+intake_wp <- round(intake_emm$means$Mean[intake_emm$means$Level == "W+"], 1)
+intake_wm <- round(intake_emm$means$Mean[intake_emm$means$Level == "W-"], 1)
+intake_diff <- round(intake_wp - intake_wm, 1)
+intake_p <- intake_emm$contrasts$`p-value`[1]
+intake_p_text <- fmt_p(intake_p)
+
+dt_wp <- round(drink_time_emm$means$Response[drink_time_emm$means$Level == "W+"], 1)
+dt_wm <- round(drink_time_emm$means$Response[drink_time_emm$means$Level == "W-"], 1)
+dt_ratio <- round(1 / drink_time_emm$contrasts$Ratio[1], 2)   # W− / W+
+dt_p  <- drink_time_emm$contrasts$`p-value`[1]
+dt_p_text <- fmt_p(dt_p)
+
+sips_wp <- round(sips_emm$means$Response[sips_emm$means$Level == "W+"], 1)
+sips_wm <- round(sips_emm$means$Response[sips_emm$means$Level == "W-"], 1)
+sips_p  <- sips_emm$contrasts$`p-value`[1]
+sips_p_text <- fmt_p(sips_p)
+sips_disp   <- round(overdisp_sips["ratio"], 2)
+
+sr_wp <- round(sip_rate_emm$means$Mean[sip_rate_emm$means$Level == "W+"], 3)
+sr_wm <- round(sip_rate_emm$means$Mean[sip_rate_emm$means$Level == "W-"], 3)
+sr_p  <- sip_rate_emm$contrasts$`p-value`[1]
+sr_p_text <- fmt_p(sr_p)
+
+overdisp_ratio <- round(overdisp["ratio"], 3)
+
+# ── Day vs night grazing means per treatment (for the two new figures) ───────
+graz_shift <- tibble(
+  treatment = factor(rep(c("S+W+", "S+W-", "S-W+", "S-W-"), each = 2),
+                     levels = c("S+W+", "S+W-", "S-W+", "S-W-")),
+  daypart   = factor(rep(c("Daytime", "Nighttime"), times = 4),
+                     levels = c("Daytime", "Nighttime")),
+  grazing   = c(
+    get_emm(graz_day_trat_emm,    "S+W+"), get_emm(graze_night_trat_emm, "S+W+"),
+    get_emm(graz_day_trat_emm,    "S+W-"), get_emm(graze_night_trat_emm, "S+W-"),
+    get_emm(graz_day_trat_emm,    "S-W+"), get_emm(graze_night_trat_emm, "S-W+"),
+    get_emm(graz_day_trat_emm,    "S-W-"), get_emm(graze_night_trat_emm, "S-W-")
+  )
+)
+
+graz_quad <- graz_shift %>%
+  pivot_wider(names_from = daypart, values_from = grazing) %>%
+  rename(day_grazing = Daytime, night_grazing = Nighttime)
+
+mean_day_graz   <- mean(graz_quad$day_grazing)
+mean_night_graz <- mean(graz_quad$night_grazing)
+
+# ── Text helpers: which behaviors differed, extremes, directions ──────────────
+and_list <- function(x) {
+  if (length(x) <= 1) return(paste(x))
+  paste(paste(x[-length(x)], collapse = ", "), "and", x[length(x)])
+}
+beh_names <- c(graz = "grazing", other = "other behaviors", lying = "lying",
+               rum = "ruminating", stand = "standing")
+p_list <- function(keys, daypart) {
+  paste0(beh_names[keys], " (p ", trt_p_text[paste0(keys, "_", daypart)], ")")
+}
+day_keys   <- c("graz", "other", "lying", "rum", "stand")
+day_sig    <- day_keys[trt_p[paste0(day_keys, "_day")]   < 0.05]
+day_ns     <- setdiff(day_keys, day_sig)
+night_sig  <- day_keys[trt_p[paste0(day_keys, "_night")] < 0.05]
+night_ns   <- setdiff(day_keys, night_sig)
+
+uni <- function(x) str_replace_all(x, "-", "−")
+desc_val <- function(var, daypart, level) {
+  round(budget_desc[[paste0(var, "_mean")]][budget_desc$treatment == level & budget_desc$daypart == daypart], 1)
+}
+extreme_trt <- function(var, daypart, fun = which.max) {
+  d <- budget_desc %>% filter(daypart == !!daypart)
+  as.character(d$treatment[fun(d[[paste0(var, "_mean")]])])
+}
+
+direction <- function(emm, hi = "more", lo = "less") {
+  if (emm$contrasts$Estimate[1] > 0) hi else lo   # first level minus second level
+}
+
+# Simple effects for daytime and nocturnal grazing (factorial models)
+se_p <- function(key, pattern) {
+  se <- simple_effects %>% filter(key == !!key, str_detect(Effect, fixed(pattern)))
+  if (nrow(se)) fmt_p(se$`p-value`) else NA_character_
+}
+fact_p <- function(key, term) fmt_p(fact_jt$p[fact_jt$key == key & fact_jt$term == term])
+
+# ── Shade use across the day (S+W− minus S+W+, percentage points) ─────────────
+shade_morning <- loc_check %>% filter(hour < watering_hours[1])
+shade_afternoon <- loc_check %>% filter(hour > watering_hours[1], !hour %in% shade_excluded_hours)
+shade_diff_morning   <- round(mean(shade_morning$diff) * 100, 1)
+shade_diff_afternoon <- round(mean(shade_afternoon$diff) * 100, 1)
+shade_morning_span   <- paste0(first(shade_morning$clock_time), "–", last(shade_morning$clock_time), "h")
+shade_afternoon_span <- paste0(first(shade_afternoon$clock_time), "–", last(shade_afternoon$clock_time), "h")
+shade_peak_hour <- loc_check %>% filter(!hour %in% shade_excluded_hours) %>%
+  mutate(m = (`prop_shade_S+W+` + `prop_shade_S+W-`) / 2) %>% slice_max(m, n = 1) %>% pull(clock_time)
+
+# ── Drinking: generalized Poisson sensitivity check ───────────────────────────
+events_gp_txt <- if (events_underdispersed) {
+  paste0("the generalized Poisson GLMM gave the same conclusion (rate ratio = ",
+         round(events_sens_tbl$`Rate ratio`[2], 2), "; p ", fmt_p(events_sens_tbl$`p-value`[2]),
+         "; dispersion φ = ", round(events_sens_tbl$`Dispersion (genpois φ)`[2], 2), ")")
+} else {
+  "no sensitivity model was required"
+}
+```
+
+## Behavioral Activity Patterns
+
+### Daytime Behavior
+
+With group × period as the experimental unit, treatment affected daytime `r and_list(p_list(day_sig, "day"))`, but not `r and_list(p_list(day_ns, "day"))` (Table 2; F tests with Satterthwaite df). Pure grazing was highest in `r uni(extreme_trt("grazing", "Daytime"))` (`r desc_val("grazing", "Daytime", extreme_trt("grazing", "Daytime"))`% of scans) and lowest in `r uni(extreme_trt("grazing", "Daytime", which.min))` (`r desc_val("grazing", "Daytime", extreme_trt("grazing", "Daytime", which.min))`%). Standing was lowest in `r uni(extreme_trt("standing", "Daytime", which.min))` (`r desc_val("standing", "Daytime", extreme_trt("standing", "Daytime", which.min))`%) and highest in `r uni(extreme_trt("standing", "Daytime"))` (`r desc_val("standing", "Daytime", extreme_trt("standing", "Daytime"))`%). Other behaviors were a small part of the budget (`r min(round(budget_desc$other_mean[budget_desc$daypart == "Daytime"], 1))`–`r max(round(budget_desc$other_mean[budget_desc$daypart == "Daytime"], 1))`% of daytime scans). Within each column of Table 2, values sharing a letter do not differ significantly (Tukey-adjusted, p > 0.05).
+
+**Table 2.** Behavioral budget (% of scans) by treatment and period. Values are mean ± SD across animals. Different letters within a column and period indicate significant differences between treatments (Tukey-adjusted, p < 0.05). S+W+ = Shade + ad libitum water; S+W− = Shade + restricted water; S−W+ = No shade + ad libitum water; S−W− = No shade + restricted water.
+
+```{r}
+#| code-summary: "Table 2 — behavior budget with day and night rows"
+
+build_cell <- function(desc, cld, behavior, daypart, level) {
+  row <- desc %>% filter(treatment == level, daypart == !!daypart)
+  m <- round(row[[paste0(behavior, "_mean")]], 1)
+  s <- round(row[[paste0(behavior, "_sd")]], 1)
+  l <- cld %>% filter(Level == level) %>% pull(Letters)
+  paste0(m, " ± ", s, " ", l)
+}
+
+build_rows <- function(daypart, cld_graz, cld_other, cld_lying, cld_rum, cld_stand) {
+  tibble(
+    Treatment          = c("S+W+", "S+W−", "S−W+", "S−W−"),
+    Period             = daypart,
+    `Grazing`          = map_chr(levels_vec, ~ build_cell(budget_desc, cld_graz,  "grazing",        daypart, .x)),
+    `Other`            = map_chr(levels_vec, ~ build_cell(budget_desc, cld_other, "other",          daypart, .x)),
+    `Lying`            = map_chr(levels_vec, ~ build_cell(budget_desc, cld_lying, "lying",          daypart, .x)),
+    `Ruminating`       = map_chr(levels_vec, ~ build_cell(budget_desc, cld_rum,   "ruminating_tot", daypart, .x)),
+    `Standing`         = map_chr(levels_vec, ~ build_cell(budget_desc, cld_stand, "standing",       daypart, .x))
+  )
+}
+
+levels_vec <- c("S+W+", "S+W-", "S-W+", "S-W-")
+
+table2 <- bind_rows(
+  build_rows("Daytime",   cld_graz_day,   cld_other_day,   cld_lying_day,   cld_rum_day,   cld_stand_day),
+  build_rows("Nighttime", cld_graz_night, cld_other_night, cld_lying_night, cld_rum_night, cld_stand_night)
+)
+
+table2 %>%
+  kbl(caption = "Table 2. Behavioral budget (% of scans) by treatment and period (mean ± SD).",
+      align = "llccccc", linesep = "") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE) %>%
+  pack_rows("Daytime", 1, 4, background = "#F5F0E8", bold = TRUE) %>%
+  pack_rows("Nighttime", 5, 8, background = "#F5F0E8", bold = TRUE) %>%
+  footnote(general = "Grazing = pure grazing; Other = behaviors outside the ethogram categories (previously added to grazing). Lying and standing are postures; ruminating is in any posture and overlaps with both. Different letters within a column and period indicate significant differences (Tukey-adjusted, p < 0.05).")
+```
+
+In the single-factor models, shaded animals (S+) grazed `r direction(graz_day_shade_emm)` during the day than unshaded animals (S−; p `r graz_p_shade`), lay down `r direction(lying_day_shade_emm)` (p `r lying_p_shade`) and stood `r direction(stand_day_shade_emm)` (p `r stand_p_shade`). Water-restricted animals (W−) grazed `r direction(graz_day_water_emm, "less", "more")` than W+ animals (p `r graz_p_water`) and stood `r direction(stand_day_water_emm, "less", "more")` (p `r stand_p_water`).
+
+The factorial models (Table 46) separate these effects. For daytime grazing, water had a strong main effect (p `r fact_p("graz_day", "water")`), shade a weaker one (p `r fact_p("graz_day", "shade")`), and the two interacted (p `r fact_p("graz_day", "shade:water")`): shade increased grazing when water was available (S+W+ vs S−W+: p `r se_p("graz_day", "| water = W+")`) but not under water restriction (S+W− vs S−W−: p `r se_p("graz_day", "| water = W-")`), so water restriction removed the grazing benefit of shade. Daytime standing was affected by both shade (p `r fact_p("stand_day", "shade")`) and water (p `r fact_p("stand_day", "water")`) without interaction (p `r fact_p("stand_day", "shade:water")`).
+
+### Nocturnal Grazing
+
+At night, treatment affected `r and_list(p_list(night_sig, "night"))`, but not `r and_list(p_list(night_ns, "night"))`. Nocturnal grazing was `r if (graze_night_shade_emm$contrasts$Estimate[1] > 0) "higher" else "lower"` in shaded than unshaded animals (p `r ngraz_p_shade`), whereas water access alone did not predict it (p `r ngraz_p_water`). Among individual treatments, `r uni(extreme_trt("grazing", "Nighttime"))` showed the highest nocturnal grazing (`r desc_val("grazing", "Nighttime", extreme_trt("grazing", "Nighttime"))`% of scans). In the factorial model the shade × water interaction for nocturnal grazing was p `r fact_p("graz_night", "shade:water")`: shade increased nocturnal grazing under water restriction (S+W− vs S−W−: p `r se_p("graz_night", "| water = W-")`) but not with free water (p `r se_p("graz_night", "| water = W+")`), consistent with compensatory night grazing in S+W−. Nocturnal lying was highest in `r uni(extreme_trt("lying", "Nighttime"))` (`r desc_val("lying", "Nighttime", extreme_trt("lying", "Nighttime"))`%; shade effect in the factorial model p `r fact_p("lying_night", "shade")`). The full 24-hour behavioral profile for each treatment is shown in Figure 1, and the day-to-night shift in grazing is illustrated in Figures 2 and 3.
+
+```{r}
+#| code-summary: "Figure 1 — 24-hour grazing and lying profile (static)"
+#| fig-cap: "Figure 1. Mean grazing and lying scans per hour across the 24-hour cycle by treatment. The vertical dashed line at 12.5 marks the daytime–nighttime transition (19:00h). The red dotted line at 12:00h marks the scheduled watering time for W− treatments."
+#| fig-width: 8
+#| fig-height: 6
+#| fig-align: center
+
+full_ts <- behavior %>%
+  group_by(treatment, hour, clock_time) %>%
+  summarise(
+    Grazing = mean(grazing, na.rm = TRUE),
+    Lying   = mean(lying,   na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  pivot_longer(c(Grazing, Lying), names_to = "behavior", values_to = "mean") %>%
+  mutate(clock_time = factor(clock_time, levels = clock_labels))
+
+ggplot(full_ts,
+       aes(x = hour, y = mean, color = behavior, group = behavior)) +
+  geom_vline(xintercept = 12.5, linetype = "dashed",
+             color = "#6B6B6B", linewidth = 0.7) +
+  geom_vline(xintercept = 5.5, linetype = "dotted",
+             color = "#CC0000", linewidth = 0.8) +
+  annotate("text", x = 6.0, y = max(full_ts$mean, na.rm = TRUE) * 0.96,
+           label = "Water (W−)", hjust = 0, size = 3, color = "#CC0000") +
+  annotate("text", x = 6.5,  y = max(full_ts$mean, na.rm = TRUE) * 0.88,
+           label = "Daytime", hjust = 0.5, size = 3, color = "#6B6B6B") +
+  annotate("text", x = 18.5, y = max(full_ts$mean, na.rm = TRUE) * 0.88,
+           label = "Nighttime", hjust = 0.5, size = 3, color = "#6B6B6B") +
+  geom_line(linewidth = 1) +
+  geom_point(size = 1.8) +
+  scale_color_manual(values = c("Grazing" = "#2C4A2E", "Lying" = "#4A7FA5")) +
+  scale_x_continuous(breaks = 1:24, labels = unname(clock_labels)) +
+  facet_wrap(~ treatment, nrow = 2) +
+  labs(x = "Clock time", y = "Mean scans / h", color = "Behavior") +
+  theme_ws(angle_x = 45)
+```
+
+```{r}
+#| code-summary: "Figure 2 — day-to-night shift in grazing (slope graph)"
+#| fig-cap: "Figure 2. Daytime and nighttime grazing (scans/h) by treatment. Lines connect each treatment's daytime mean to its nighttime mean; a positive slope indicates a shift toward nocturnal grazing."
+#| fig-width: 6
+#| fig-height: 4.5
+#| fig-align: center
+
+ggplot(graz_shift,
+       aes(x = daypart, y = grazing, color = treatment, group = treatment)) +
+  geom_line(linewidth = 1.2, alpha = 0.85) +
+  geom_point(size = 4) +
+  scale_color_manual(values = pal_treatment) +
+  scale_y_continuous(limits = c(0, NA)) +
+  labs(x = NULL, y = "Grazing (scans / h)", color = "Treatment") +
+  theme_ws()
+```
+
+```{r}
+#| code-summary: "Figure 3 — daytime vs nighttime grazing quadrant"
+#| fig-cap: "Figure 3. Relationship between daytime and nighttime grazing (scans/h) by treatment. Dashed lines mark the grand means; points in the upper-left quadrant indicate treatments that shifted grazing toward the night."
+#| fig-width: 6
+#| fig-height: 5
+#| fig-align: center
+
+ggplot(graz_quad,
+       aes(x = day_grazing, y = night_grazing,
+           color = treatment, label = treatment)) +
+  geom_hline(yintercept = mean_night_graz, linetype = "dashed",
+             color = "#6B6B6B", linewidth = 0.5) +
+  geom_vline(xintercept = mean_day_graz,   linetype = "dashed",
+             color = "#6B6B6B", linewidth = 0.5) +
+  geom_point(size = 5) +
+  geom_text(nudge_y = 0.03, size = 3.5, fontface = "bold",
+            show.legend = FALSE) +
+  scale_color_manual(values = pal_treatment) +
+  coord_cartesian(xlim = c(min(graz_quad$day_grazing) - 0.2,
+                           max(graz_quad$day_grazing) + 0.2),
+                  ylim = c(min(graz_quad$night_grazing) - 0.05,
+                           max(graz_quad$night_grazing) + 0.1)) +
+  labs(x = "Daytime grazing (scans / h)",
+       y = "Nocturnal grazing (scans / h)") +
+  theme_ws() +
+  theme(legend.position = "none")
+```
+
+## Drinking Behavior and Water Intake
+
+Counting every animal-day (including `r events_n_zero` animal-days without drinking), ad libitum animals (W+) drank `r events_rr`× as often as restricted animals (`r events_rate_wp` vs `r events_rate_wm` events/animal/day; rate ratio = `r events_rr`; p `r events_p_text`). The Poisson model was underdispersed (dispersion ratio = `r overdisp_ratio`); `r events_gp_txt`. Daily water intake per animal was `r intake_wp` L in W+ and `r intake_wm` L in W− (difference = `r intake_diff` L; p `r intake_p_text`), `r if (intake_p < 0.05) "a significant difference" else "a difference that was not significant with group × period as the experimental unit"`. Within bouts, W− animals took `r if (sips_p < 0.05) "more" else "a similar number of"` sips per event (`r sips_wm` vs `r sips_wp`; `r sips_family`, Poisson dispersion ratio = `r sips_disp`; p `r sips_p_text`), and their bouts were `r if (dt_p < 0.05) "longer" else "not significantly longer"` (geometric mean `r dt_wm` s vs `r dt_wp` s; ratio = `r dt_ratio`; p `r dt_p_text`), at the same sip rate (W+: `r sr_wp` sips/s; W−: `r sr_wm` sips/s; p `r sr_p_text`).
+
+```{r}
+#| code-summary: "Figure 4 — drinking events per animal per day (static)"
+#| fig-cap: "Figure 4. Drinking events per animal per day by treatment. Points are individual animal-day observations; diamonds and bars show group mean ± SE."
+#| fig-width: 6
+#| fig-height: 4
+#| fig-align: center
+
+events_summary_plot <- events %>%
+  group_by(treatment, water) %>%
+  summarise(
+    mean = mean(events),
+    se   = sd(events) / sqrt(n()),
+    .groups = "drop"
+  )
+
+ggplot(events, aes(x = treatment, color = treatment)) +
+  geom_jitter(aes(y = events), width = 0.15, alpha = 0.45,
+              size = 2.5, shape = 16) +
+  geom_pointrange(
+    data = events_summary_plot,
+    aes(y = mean, ymin = mean - se, ymax = mean + se),
+    shape = 18, size = 0.9, linewidth = 1.1, color = "black"
+  ) +
+  scale_color_manual(values = pal_treatment) +
+  labs(x = "Treatment", y = "Drinking events / animal / day", color = NULL) +
+  theme_ws() +
+  theme(legend.position = "none")
+```
+
+```{r}
+#| code-summary: "Figure 5 — water intake (static)"
+#| fig-cap: "Figure 5. Daily water intake (L/animal/day) by treatment. Bars show group mean ± SE; points show daily group observations."
+#| fig-width: 6
+#| fig-height: 4
+#| fig-align: center
+
+intake_summary_plot <- intake %>%
+  group_by(treatment, water) %>%
+  summarise(
+    mean = mean(intake_per_animal, na.rm = TRUE),
+    se   = sd(intake_per_animal,   na.rm = TRUE) / sqrt(n()),
+    .groups = "drop"
+  )
+
+ggplot(intake_summary_plot,
+       aes(x = treatment, y = mean, fill = treatment)) +
+  geom_col(alpha = 0.8, width = 0.65) +
+  geom_errorbar(aes(ymin = mean - se, ymax = mean + se),
+                width = 0.2, linewidth = 0.8) +
+  geom_point(data = intake,
+             aes(y = intake_per_animal, color = treatment),
+             position = position_jitter(width = 0.08),
+             alpha = 0.6, size = 2.2, shape = 16) +
+  scale_fill_manual(values = pal_treatment) +
+  scale_color_manual(values = pal_treatment) +
+  labs(x = "Treatment", y = "Water intake (L / animal / day)") +
+  theme_ws() +
+  theme(legend.position = "none")
+```
+
+```{r}
+#| code-summary: "Figure 6 — drinking bout characteristics (static, 3 panels)"
+#| fig-cap: "Figure 6. Drinking bout characteristics by treatment: (a) duration per event (s), (b) sips per event, and (c) sip rate (sips/s). Boxes show the interquartile range; horizontal line = median; points are individual observations."
+#| fig-width: 12
+#| fig-height: 4
+#| fig-align: center
+#| layout-ncol: 3
+
+p_dt <- ggplot(drinking, aes(x = treatment, y = drinking_time_s, fill = treatment)) +
+  geom_boxplot(alpha = 0.7, outlier.shape = NA) +
+  geom_jitter(width = 0.15, alpha = 0.3, size = 1.0) +
+  scale_fill_manual(values = pal_treatment) +
+  labs(x = "Treatment", y = "Drinking duration (s)") +
+  theme_ws() +
+  theme(legend.position = "none")
+
+p_sips <- ggplot(drinking, aes(x = treatment, y = sips, fill = treatment)) +
+  geom_boxplot(alpha = 0.7, outlier.shape = NA) +
+  geom_jitter(width = 0.15, alpha = 0.3, size = 1.0) +
+  scale_fill_manual(values = pal_treatment) +
+  labs(x = "Treatment", y = "Sips per event") +
+  theme_ws() +
+  theme(legend.position = "none")
+
+p_sr <- ggplot(drinking, aes(x = treatment, y = sip_rate_s, fill = treatment)) +
+  geom_boxplot(alpha = 0.7, outlier.shape = NA) +
+  geom_jitter(width = 0.15, alpha = 0.3, size = 1.0) +
+  scale_fill_manual(values = pal_treatment) +
+  labs(x = "Treatment", y = "Sip rate (sips / s)") +
+  theme_ws() +
+  theme(legend.position = "none")
+
+p_dt
+p_sips
+p_sr
+```
+
+## Shade Area Use
+
+Among S+ animals, those with restricted water (S+W−) spent `r if (shade_p < 0.05) "a significantly greater" else "a similar"` proportion of daytime scans in shade compared with ad libitum animals (`r scales::percent(prop_spwm, accuracy = 0.1)` vs `r scales::percent(prop_spwp, accuracy = 0.1)`; p `r shade_p_text`), despite having access to the same silvopastoral area (Figure 7). The difference came mainly from the morning: between `r shade_morning_span`, S+W− animals were in shade `r shade_diff_morning` percentage points more often than S+W+ on average, whereas between `r shade_afternoon_span` the two treatments differed by only `r shade_diff_afternoon` points on average. Shade use peaked at `r shade_peak_hour`h. The `r paste0(clock_labels[shade_excluded_hours], "h", collapse = " and ")` scan blocks were excluded for both treatments because S+W− animals were in the trough corridor (recorded as sun) during watering. This shows a trade-off: water restriction made animals leave shaded areas during hot hours.
+
+```{r}
+#| code-summary: "Figure 7 — shade use across the day (static)"
+#| fig-cap: "Figure 7. Mean proportion of daytime scans in shade by hour (S+ treatments). Ribbons = ±1 SD. Red dashed lines mark the W− watering blocks (12:00h and 17:00h), excluded from the analysis for both treatments."
+#| fig-width: 7
+#| fig-height: 4.5
+#| fig-align: center
+
+shade_hour <- shade_model_data %>%
+  mutate(hour_int = as.integer(as.character(hour))) %>%
+  group_by(treatment, hour_int) %>%
+  summarise(
+    mean = mean(prop_shade, na.rm = TRUE),
+    sd   = sd(prop_shade,   na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(clock = factor(scan_to_clock(hour_int), levels = day_labels))
+
+ggplot(shade_hour,
+       aes(x = clock, y = mean,
+           color = treatment, fill = treatment, group = treatment)) +
+  geom_ribbon(aes(ymin = pmax(mean - sd, 0), ymax = pmin(mean + sd, 1)),
+              alpha = 0.15, color = NA) +
+  geom_vline(xintercept = shade_excluded_hours, linetype = "dashed",
+             color = "#CC0000", linewidth = 0.9) +
+  annotate("text", x = shade_excluded_hours + 0.15, y = 0.75, hjust = 0, vjust = 0, size = 3,
+           color = "#CC0000", label = "Water offering time") +
+  geom_line(linewidth = 1.2) +
+  geom_point(size = 2.5) +
+  scale_color_manual(values = c("S+W+" = "#2C4A2E", "S+W-" = "#4A7FA5")) +
+  scale_fill_manual( values = c("S+W+" = "#2C4A2E", "S+W-" = "#4A7FA5")) +
+  scale_y_continuous(labels = scales::percent, limits = c(0, 1)) +
+  scale_x_discrete(drop = FALSE) +
+  labs(x = "Clock time", y = "Proportion of scans in shade",
+       color = "Treatment", fill = "Treatment") +
+  theme_ws(angle_x = 45)
+```
+
+```{r}
+#| code-summary: "Figure 8 — location distribution across the day (static, stacked area)"
+#| fig-cap: "Figure 8. Proportion of daytime scans by location for S+ treatments. Red dashed line marks 12:00h."
+#| fig-width: 8
+#| fig-height: 4.5
+#| fig-align: center
+
+shade_use_static <- behavior_raw %>%
+  filter(
+    treatment %in% c("S+W+", "S+W-"),
+    location  %in% c("sun", "shade", "sun_between_trees"),
+    hour <= 12
+  ) %>%
+  group_by(treatment, hour, clock_time, location) %>%
+  summarise(total_scans = sum(total, na.rm = TRUE), .groups = "drop") %>%
+  group_by(treatment, hour, clock_time) %>%
+  mutate(
+    prop       = total_scans / sum(total_scans),
+    clock_time = factor(clock_time, levels = day_labels)
+  ) %>%
+  ungroup()
+
+annotation_df <- data.frame(
+  treatment  = factor("S+W-", levels = c("S+W+", "S+W-")),
+  clock_time = factor("12:00", levels = levels(shade_use_static$clock_time)),
+  prop       = 0.75,
+  label      = "Water offering time"
+)
+
+line_df <- data.frame(
+  treatment  = factor("S+W-", levels = c("S+W+", "S+W-")),
+  x          = 6,
+  xend       = 6,
+  y          = 0,
+  yend       = 1
+)
+
+ggplot(shade_use_static,
+       aes(x = clock_time, y = prop, fill = location, group = location)) +
+  geom_area(position = "fill", alpha = 0.85) +
+  geom_segment(data = line_df,
+               aes(x = x, xend = xend, y = y, yend = yend),
+               inherit.aes = FALSE,
+               linetype = "dashed", color = "#CC0000", linewidth = 1) +
+  geom_text(data = annotation_df,
+            aes(x = clock_time, y = prop, label = label),
+            inherit.aes = FALSE,
+            hjust = 0, vjust = 0, size = 3, color = "#CC0000",
+            nudge_x = 0.5) +
+  scale_fill_manual(
+    values = pal_location,
+    labels = c("Sun", "Shade", "Sun between trees")
+  ) +
+  scale_y_continuous(labels = scales::percent) +
+  facet_wrap(~ treatment) +
+  labs(x = "Clock time (daytime)",
+       y = "Proportion of scans", fill = "Location") +
+  theme_ws(angle_x = 45)
+```
+## Sensitivity to the Experimental Unit
+
+```{r}
+#| include: false
+#| code-summary: "Values for the experimental-unit sensitivity text"
+
+eu_label <- function(outcome, daypart) {
+  o <- tolower(str_remove(outcome, " \\(.*\\)$"))
+  if_else(daypart == "24 h", o, paste(tolower(daypart), o))
+}
+# Treatment F (behavior only) plus shade, water and shade × water per outcome
+eu_n_tests <- sum(!is.na(eu_compare$mm_trt)) + 3 * nrow(eu_compare)
+eu_n_flip  <- nrow(eu_flips)
+eu_flip_txt <- eu_flips %>%
+  mutate(txt = paste0(tolower(term), " for ", eu_label(Outcome, Daypart),
+                      " (LS p ", fmt_p(ls), "; mixed model p ", fmt_p(mm), ")")) %>%
+  pull(txt) %>% and_list()
+eu_gp_zero_txt <- eu_compare %>% filter(gp_zero) %>%
+  mutate(lab = eu_label(Outcome, Daypart)) %>% pull(lab) %>% and_list()
+```
+
+Reducing each outcome to its `r eu_compare$n_units[1]` group × period means and analysing them as a Latin square (`r eu_compare$df_error[1]` error df) gave the same conclusion at the 0.05 level for `r eu_n_tests - eu_n_flip` of `r eu_n_tests` tests (Table 47a). `r if (eu_n_flip) paste0("The ", eu_n_flip, " that differed were ", eu_flip_txt, " (Table 47b).") else "No test changed."` The group:period variance was ≈ 0 in the mixed models for `r eu_gp_zero_txt`; for these outcomes the Latin-square test on group × period means is the more conservative reference.

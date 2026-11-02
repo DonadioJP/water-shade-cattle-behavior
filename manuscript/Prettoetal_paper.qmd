@@ -1,0 +1,246 @@
+---
+title: "Effect of the combination of water and shade on the behavior and thermal comfort of cattle in a pasture system"
+authors:
+  - name: Fidel de Souza Pretto
+    affiliations:
+      - ref: leta
+      - ref: ppgagro
+    email: ""
+    orcid: ""
+  - name: João Pedro Donadio
+    affiliations:
+      - ref: lincoln
+    email: jp.donadio@gmail.com
+    orcid: "0000-0002-6728-4373"
+  - name: Luiz Carlos Pinheiro Machado Filho
+    affiliations:
+      - ref: leta
+    email: pinheiro.machado@ufsc.br
+    orcid: ""
+    corresponding: true
+affiliations:
+  - id: leta
+    name: Laboratory of Applied Ethology and Animal Welfare (LETA), Department of Zootechny and Rural Development, Federal University of Santa Catarina
+    address: Rod. Admar Gonzaga, 1346, Florianópolis, SC 88034-000, Brazil
+  - id: ppgagro
+    name: Programa de Pós-Graduação em Agroecossistemas, Universidade Federal de Santa Catarina
+    address: Florianópolis, SC, Brazil
+  - id: lincoln
+    name: The Lincoln University Pastoral Livestock Production Lab, 
+    address: Lincoln, Christchurch, New Zealand
+keywords:
+  - animal-environment interaction
+  - pasture-based production
+  - thermal stress
+  - water intake
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    number-sections: true
+    theme: cosmo
+  pdf:
+    documentclass: article
+    keep-tex: false
+execute:
+  echo: false
+  warning: false
+  message: false
+
+---
+
+```{r}
+#| echo: false
+# bibliography: references.bib
+# csl: apa.csl
+```
+## Abstract {.unnumbered}
+
+
+
+**Keywords:** animal-environment interaction; pasture-based production; thermal stress; water intake
+
+---
+
+## Introduction
+
+<!-- 
+Paragraph 1: Introduce the problem — effect of climate variation on dairy/beef cows
+Paragraph 2: How shade and water can help mitigate thermal stress
+Paragraph 3: Behavior and dominance factors in resource access + what our study adds to the literature
+Paragraph 4: Hypothesis and objectives
+-->
+
+*[Introduction to be written — see notes below for structure]*
+
+The hypothesis of the study was that the availability of water and shade alters the ingestive behavior of cattle, resulting in greater rest time during the hottest periods of the day compared to restricted or no access to these resources. However, during the night, cattle raised with free access to water and shade show greater grazing time, compensating for the reduction of this behavior during the day.
+
+The objectives of the study were:
+
+1. To evaluate the effect of *ad libitum* water availability on the diurnal and nocturnal behavior of cows;
+2. To evaluate the effect of shade provision on the diurnal and nocturnal behavior of cows;
+3. To evaluate the effect of *ad libitum* water availability, combined or not with shade, on the thermal comfort of cows.
+
+---
+
+## Methods
+
+Animal procedures were approved by the Ethics Committee on Animal Use (CEUA) of the Federal University of Santa Catarina (UFSC) (CEUA Protocol 857122042).
+
+### Study Site and Animals
+
+The study was conducted at the Bovine Vivarium of the Ressacada Experimental Farm (FER) — Federal University of Santa Catarina, located in Florianópolis, Brazil (27°40'25" S; 48°32'30" W), from December 2021 to April 2022. The experimental area covered 3.2 ha and was divided into twelve paddocks of 2,600 m² each. Six paddocks were shaded by *Inga edulis* trees planted in rows with 3 m spacing between plants and 20 m between rows. The remaining six paddocks contained pasture only. Forage species present across all paddocks included plants from the genera *Brachiaria*, *Melilotus*, *Setaria*, *Axonopus*, *Cynodon*, *Panicum*, *Hemarthria*, *Desmodium*, *Trifolium*, *Lotus*, *Pennisetum*, *Arachis*, *Stylosanthes*, *Lolium* and *Paspalum*.
+
+### Experimental Design
+
+Thirty-two females of the Braford (mean body weight: 478 ± 44 kg) and Jersey (mean body weight: 385 ± 33 kg) breeds were divided into four groups of eight animals each (four Braford and four Jersey per group). Animals were individually identified with ear tags and numbered on both flanks using non-toxic paint. The experiment was conducted in a 4 × 4 Latin square design over four periods (repetitions), with groups randomly allocated to treatments in each period. Treatments were:
+
+| Code | Treatment | Description |
+|------|-----------|-------------|
+| **S+W+** | Shade + *ad libitum* water | Paddocks with shade, pasture, mineral supplement and water available 24h |
+| **S+W-** | Shade + restricted water | Paddocks with shade, pasture and mineral supplement *ad libitum*; water available only 1h/day (12:00–12:30 and 17:30–18:00) |
+| **S-W+** | No shade + *ad libitum* water | Paddocks without shade, with pasture, mineral supplement and water available 24h |
+| **S-W-** | No shade + restricted water | Paddocks without shade, with pasture and mineral supplement *ad libitum*; water available only 1h/day (12:00–12:30 and 17:30–18:00) |
+
+: Experimental treatments {#tbl-treatments}
+
+Animals were weighed individually at the start and end of each period. Each repetition occurred at 30-day intervals and lasted five days: two days of adaptation, two days of data collection, separated by one rest day. Groups were managed under the Voisin Rational Grazing system [@MachadoFilho2021]. Paddocks (2,600 m²) were subdivided with temporary fencing (1,300 m²), yielding 162 m² of pasture per animal. Animals remained 24h in each subdivision and were moved daily at 06:50h. In shaded treatments, each subdivision included 390 m² of shade area, guaranteeing 48.7 m²/animal.
+
+### Data Collection
+
+Behavioral assessments occurred from 07:00 on one day to 07:00 the following day, on alternate days, totaling 48h of observation per period. Observers underwent training and two reliability tests. During data collection, observers alternated between treatments and animal groups to reduce observational bias. Both reliability tests achieved 95% agreement between observers [@Lehner1996].
+
+Observers were positioned at a distance that allowed observation without interfering with animal behavior. Short-duration behaviors were recorded as events; longer-duration behaviors were classified as states and sampled at regular intervals as instantaneous records [@Altmann1974].
+
+#### Behavioral Observations
+
+Individual behavioral observations were recorded on field sheets simultaneously across all four groups, noting the animal, paddock location and time. Records were taken instantaneously every 10 minutes, according to @tbl-ethogram. The ethogram follows definitions adopted by the Laboratory of Applied Ethology (LETA) [@Coimbra2012; @Bica2020; @Sousa2021].
+
+| Behavior | Description |
+|----------|-------------|
+| Grazing | Animal with head lowered to pasture height, apprehending forage, stationary or moving |
+| Ruminating | Animal with head at or above body level performing lateral mandibular chewing movements, lying or standing |
+| Drinking | Animal with lips submerged in water performing esophageal and swallowing movements |
+| Walking | Animal in movement with head above pasture level |
+| Standing idle | Animal standing or lying without performing body movements |
+| Mineralizing | Animal licking and ingesting mineral supplement |
+| Other | Any behavior not described above |
+
+: Behavioral ethogram {#tbl-ethogram}
+
+#### Water Consumption
+
+Water meters (Unimag®, precision 0.01 L) were installed at the inlet of each trough — between the ball valve and flange — to record consumption per group individually. Troughs were circular plastic reservoirs (Multilit®, 500 L; 0.6 m height × 1.2 m diameter), marked at the upper rim to indicate maximum water level. Consumption was recorded on all observation days at 07:00 and 19:00h. Volume differences were corrected for daily precipitation and total evaporation relative to trough surface area. All troughs were supplied from the same water source, controlled by a float valve.
+
+In the **S+W−** and **S−W−** treatments, animals were led through a corridor (5 m wide) to troughs located 100 m from the paddocks at the designated times (12:00–12:30 and 17:30–18:00). These drinking times reflect practices commonly observed on farms that do not provide in-paddock water. In **S+W+** and **S−W+** treatments, troughs remained available throughout the day.
+
+To reduce human interference with animal behavior and facilitate nighttime observation of drinking events, surveillance cameras (Intelbras®) were installed at each trough, connected to a video storage device, recording continuously during observation days.
+
+Drinking behavior was evaluated as events [@Coimbra2012]: at each trough visit, time, number of sips (G), animal identity (AE), drinking time (TB) and sip rate (TG, sips/second) were recorded. Water intake was considered when the animal had its lips submerged and was performing swallowing movements. Time spent with head raised was discounted and restarted when the animal resumed drinking during the same visit.
+
+#### Thermal Comfort
+
+Climatic variables — air temperature (TA), relative humidity (RH), wind speed, evaporation, rainfall and sunshine hours — were collected daily at the FER–UFSC Meteorological Station (station ID 1036), located 300 m from the experimental area.
+
+The Black Globe Temperature and Humidity Index (ITGU) was calculated hourly from 09:00 to 18:00h as an indicator of heat stress in cattle. Black globe thermometers were installed in shaded and unshaded paddocks, fixed at 1 m height above ground (approximately the trunk height of a medium-sized cow). Globe temperature (TGN) data were recorded every 5 minutes from 09:00 to 18:00h using a Data Logger (Elitech® RC-4HC).
+
+ITGU was calculated using @eq-itgu described by @Buffington1981:
+
+$$
+\text{ITGU} = T_{gn} + 0.36 \cdot T_{po} - 41.5
+$$ {#eq-itgu}
+
+Where: ITGU = Black Globe Temperature and Humidity Index; $T_{gn}$ = black globe temperature (°C); $T_{po}$ = dew point temperature (°C).
+
+Dew point temperature (TPO) was calculated using @eq-tpo simplified by @Wilhelm1976:
+
+$$
+T_{po} = T_a - \frac{(100 - \text{RH})}{5}
+$$ {#eq-tpo}
+
+Where: $T_a$ = air temperature (°C); RH = relative humidity (%).
+
+ITGU thresholds follow @Baeta2010: ≤74 = comfort; 75–78 = alert; 79–84 = danger; >84 = critical.
+
+The Radiant Thermal Load (CTR) was calculated using @eq-ctr proposed by @Esmay1982:
+
+$$
+\text{CTR} = \sigma \times T_m^4
+$$ {#eq-ctr}
+
+Where: $\sigma$ = Stefan-Boltzmann constant (5.67 × 10⁻⁸ W/m² K⁴); $T_m$ = mean radiant temperature (W/m²).
+
+Soil surface temperature (TS) was measured hourly from 09:00 to 18:00h in all treatments using an infrared thermometer (Simpla® TI-55; range −55 to 550 °C; precision ±1 °C; resolution 0.1 °C). In RAL and RAV, measurements were taken at four random points; in SAV and SAL, at eight points (four under tree canopy, four in unshaded areas). All measurements were performed by the same person following a standardized positioning and distance protocol.
+
+For non-invasive assessment of treatment effects on animal body surface temperature, thermographic images were obtained from 16 cows (four per group: two Braford and two Jersey). The anatomical regions assessed were: eye (O), right flank (FD), left flank (FE) and posterior udder (U) [@Montanholi2008; @Sorensen2014]. Animals were photographed at 3 m distance at 10:00, 13:00 and 16:00h during collection days in each period (with the exception of the last day of period 4 due to rain). Images were captured using an infrared thermographic camera (Flir® T640; emissivity coefficient 0.98 for biological tissues, per manufacturer recommendation) and analyzed in Flir Thermal Studio® software to extract minimum, mean and maximum temperatures for each anatomical region. Mean and maximum temperatures were used for analysis; minimum values were excluded due to greater environmental influence [@Montanholi2008; @Salles2016].
+
+### Statistical Analysis
+
+All analyses were performed in R (R Core Team, 2023) using the packages `lme4`, `lmerTest`, and `emmeans`. Descriptive statistics (mean, standard deviation, minimum, and maximum) were computed per treatment group.
+
+#### Behavioral and Thermal Outcomes
+
+Continuous outcomes (behavioral scan counts, black globe temperature, WBGT, thermal radiation load, soil surface temperature, and body surface temperature) were analyzed using linear mixed models (LMM) fitted with `lmer()` (lmerTest package, Satterthwaite degrees of freedom):
+
+$$
+Y_{ijk} = \alpha_j + (1 \mid \text{animal}_i) +
+          (1 \mid \text{day}_k / \text{hour}_{jk}) + \varepsilon_{ijk}
+$$
+
+where $\alpha_j$ is the fixed effect of treatment, shade group (S+/S−), or water group (W+/W−). Random effects included animal identity and observation hour nested within experimental day. Thermography models included animal identity and day/hour nested within day as random effects; water intake models used experimental group and day.
+
+#### Drinking Event Counts
+
+Daily drinking events per animal were modeled with a Poisson generalized linear mixed model (GLMM) using `glmer()`:
+
+$$
+\log(\lambda_{ij}) = \alpha_j + (1 \mid \text{animal}_i) + (1 \mid \text{day}_k)
+$$
+
+Back-transformed event rates and rate ratios (W+ vs W−) are reported.
+
+#### Post-hoc Comparisons
+
+Estimated marginal means (EMMs) and pairwise contrasts were obtained using the `emmeans` package with Tukey adjustment for multiple comparisons. Significance levels: \*\*\* *p* < 0.001; \*\* *p* < 0.01; \* *p* < 0.05; . *p* < 0.1;
+ns *p* ≥ 0.1.
+
+## Results
+
+### Thermal Comfort
+
+*[Results to be written — analysis pending]*
+
+### Behavior
+
+*[Results to be written — analysis pending]*
+---
+
+## Discussion
+
+*[Discussion to be written after Results section is complete]*
+
+---
+
+## Conclusions
+
+*[Conclusions to be written after Discussion is complete]*
+
+---
+
+## Conflict of Interest
+
+All authors approve the present version of the manuscript and agree to be accountable for all aspects of the study. None of the authors has a financial or personal relationship with other people or organizations that could inappropriately influence or bias the content of the paper.
+
+---
+
+## Acknowledgments
+
+F.S.P. acknowledges CAPES (Coordination for the Improvement of Higher Education Personnel, Brazil) for the scholarship during their Master's degree in the Graduate Program in Agroecosystems (Federal University of Santa Catarina, Florianópolis, SC).
+
+---
+
+## References {.unnumbered}
+
+::: {#refs}
+:::

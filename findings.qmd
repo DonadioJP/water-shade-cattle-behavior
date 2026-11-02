@@ -1,0 +1,156 @@
+---
+title: "Key Findings"
+subtitle: "An integrated interpretation of thermal environment, behavioral responses, and water balance"
+---
+
+```{r}
+#| include: false
+#| cache: false
+
+# Not cached, so packages are attached on every render: helper functions from
+# the results pages (e.g. uni(), extreme_trt()) use dplyr and stringr.
+library(tidyverse)
+```
+
+```{r}
+#| include: false
+#| cache.extra: !expr tools::md5sum(c("results-behavior.qmd", "results-thermal.qmd", list.files("data", full.names = TRUE)))
+#| code-summary: "Run the two results pages and keep their computed values"
+
+# Every number on this page comes from the models on the results pages. Each
+# page is purled and run in a separate R process; its objects (minus fitted
+# models and plots) are returned as an environment, so helper functions such as
+# fact_p() keep working against their own page's results.
+page_values <- function(qmd) {
+  callr::r(function(qmd, proj) {
+    setwd(proj)
+    pdf(NULL)
+    r_file <- tempfile(fileext = ".R")
+    knitr::purl(qmd, output = r_file, documentation = 0, quiet = TRUE)
+    env <- new.env()
+    suppressMessages(suppressWarnings(sys.source(r_file, envir = env)))
+    heavy <- vapply(ls(env), function(n) {
+      inherits(get(n, env), c("merMod", "glmmTMB", "lm", "gg", "ggplot", "plotly",
+                               "htmlwidget", "knitr_kable", "patchwork"))
+    }, logical(1))
+    rm(list = names(heavy)[heavy], envir = env)
+    env
+  }, args = list(qmd = qmd, proj = getwd()))
+}
+
+B <- page_values("results-behavior.qmd")   # behavior, drinking, shade use
+TH <- page_values("results-thermal.qmd")    # environment, BGHI, thermography
+```
+
+```{r}
+#| include: false
+#| code-summary: "Values used in the text"
+
+# Factorial and simple-effect p-values (numeric) for conditional wording
+fp <- function(key, term) B$fact_jt$p[B$fact_jt$key == key & B$fact_jt$term == term]
+sp <- function(key, pattern) {
+  se <- B$simple_effects %>% dplyr::filter(key == !!key, stringr::str_detect(Effect, stringr::fixed(pattern)))
+  if (nrow(se)) se$`p-value` else NA_real_
+}
+
+graz_int_p      <- fp("graz_day", "shade:water")
+graz_shade_wp_p <- sp("graz_day", "| water = W+")
+graz_shade_wm_p <- sp("graz_day", "| water = W-")
+ngraz_int_p     <- fp("graz_night", "shade:water")
+ngraz_shade_wm_p <- sp("graz_night", "| water = W-")
+
+pct <- function(trt, var, daypart) B$desc_val(var, daypart, trt)
+
+crit_red <- round((1 - TH$bghi_crit_hrs_sh / TH$bghi_crit_hrs) * 100)
+
+pv <- function(txt) sub("^= ", "", txt)   # "= 0.141" → "0.141" for table cells
+
+eu_intake <- B$eu_compare %>% dplyr::filter(key == "intake")
+```
+
+::: {.callout-note}
+This page synthesizes results from the [Thermal Comfort](results-thermal.qmd) and [Behavior](results-behavior.qmd) pages. Every value is computed from the models on those pages when the site is rendered. Model results are estimated marginal means (EMMs) from mixed models with group × period (`r B$eu_compare$n_units[1]` units) as the experimental unit; behavioral percentages are raw means across animals (Table 2 of the Behavior page).
+:::
+
+---
+
+## 1 · Shade Reduced Thermal Load — But Did Not Eliminate Heat Stress
+
+Shade access reduced black globe temperature by **`r TH$g_diff` °C** on average (`r TH$g_sun` °C in sun vs `r TH$g_shade` °C in shade; *p* `r TH$g_p_text`), with peak unshaded temperatures reaching **`r TH$globe_sun_max` °C**. Radiant thermal load was **`r TH$rtl_pct_red`%** lower under shade (`r TH$rtl_shade_emm` vs `r TH$rtl_sun_emm` W/m²; *p* `r TH$rtl_p_text`).
+
+Despite this reduction, thermal stress was not fully eliminated in either condition. Using BGHI thresholds (Baeta & Souza, 2010; comfort ≤ 74, alert > 74–78, danger > 78–84, critical > 84):
+
+| Condition | Critical hours (BGHI > 84) | Danger or critical hours (BGHI > 78) | Hours recorded |
+|-----------|:--------------------------:|:------------------------------------:|:--------------:|
+| Sun       | `r TH$bghi_crit_hrs`        | `r TH$bghi_alert_hrs`                 | `r TH$bghi_alert_total` |
+| Shade     | `r TH$bghi_crit_hrs_sh`     | `r TH$bghi_alert_hrs_sh`              | `r TH$bghi_alert_total_sh` |
+
+Shade reduced critical-threshold hours by **`r crit_red`%**, but shaded paddocks still reached danger or critical levels in `r TH$bghi_alert_hrs_sh` of `r TH$bghi_alert_total_sh` recorded hours. Shade alone did not remove heat stress under the conditions observed.
+
+Soil surface temperature followed the same gradient — shade **`r TH$soil_shade_m` °C**, sun between trees **`r TH$soil_sbt_m` °C**, full sun **`r TH$soil_sun_m` °C** (shade vs sun between trees: *p* `r TH$soil_p_shade_sbt_text`; shade vs full sun: *p* `r TH$soil_p_shade_sun_text`) — so the benefit of shade extended to the ground where cattle lie.
+
+---
+
+## 2 · Daytime Behavior: Water Restriction Reduced Grazing; Shade Helped Only With Water
+
+Treatment affected daytime `r B$and_list(B$p_list(B$day_sig, "day"))`, but not `r B$and_list(B$p_list(B$day_ns, "day"))`. In the shade × water factorial models, water access had the clearest effect on daytime grazing (*p* `r B$fact_p("graz_day", "water")`). Shade and water `r if (isTRUE(graz_int_p < 0.05)) "interacted" else "did not clearly interact"` (*p* `r B$fact_p("graz_day", "shade:water")`): shade `r if (isTRUE(graz_shade_wp_p < 0.05)) "increased" else "did not change"` grazing when water was ad libitum (S+W+ vs S−W+: *p* `r B$fmt_p(graz_shade_wp_p)`) and `r if (isTRUE(graz_shade_wm_p < 0.05)) "also changed it" else "had no effect"` under water restriction (S+W− vs S−W−: *p* `r B$fmt_p(graz_shade_wm_p)`).
+
+S+W+ animals grazed the most (**`r pct("S+W+", "grazing", "Daytime")`%** of daytime scans) and stood the least (**`r pct("S+W+", "standing", "Daytime")`%**). Daytime standing rose with both lack of shade (factorial shade *p* `r B$fact_p("stand_day", "shade")`) and water restriction (water *p* `r B$fact_p("stand_day", "water")`), reaching **`r pct("S-W-", "standing", "Daytime")`%** of scans in S−W−.
+
+::: {.callout-note appearance="minimal"}
+**S+W− as the pivotal treatment.** Animals with shade but restricted water (S+W−) grazed `r pct("S+W-", "grazing", "Daytime")`% of daytime scans, against `r pct("S+W+", "grazing", "Daytime")`% in S+W+ and `r pct("S-W-", "grazing", "Daytime")`% in S−W−. `r if (isTRUE(graz_shade_wm_p >= 0.05)) "Under water restriction, shade did not change daytime grazing, so the thermal comfort provided by shade did not offset the effect of restricted water." else "Shade still changed daytime grazing under water restriction."`
+:::
+
+---
+
+## 3 · Nocturnal Grazing Was Highest in S+W−
+
+At night, treatment affected `r B$and_list(B$p_list(B$night_sig, "night"))`, but not `r B$and_list(B$p_list(B$night_ns, "night"))`. The highest nocturnal grazing was in **`r B$uni(B$extreme_trt("grazing", "Nighttime"))`** (`r pct(B$extreme_trt("grazing", "Nighttime"), "grazing", "Nighttime")`% of night scans). In the factorial model the shade × water interaction was *p* `r B$fact_p("graz_night", "shade:water")`, and shade `r if (isTRUE(ngraz_shade_wm_p < 0.05)) "increased" else "did not change"` nocturnal grazing under water restriction (S+W− vs S−W−: *p* `r B$fmt_p(ngraz_shade_wm_p)`). This is consistent with S+W− animals recovering at night some of the grazing they lost during the day. Water access on its own `r if (B$graze_night_water_emm$contrasts[["p-value"]][1] < 0.05) "also predicted" else "did not predict"` nocturnal grazing (*p* `r B$ngraz_p_water`).
+
+---
+
+## 4 · Water Restriction Changed Drinking Frequency More Than Intake
+
+Counting every animal-day, W+ animals drank **`r B$events_rr`×** as often as W− animals (`r B$events_rate_wp` vs `r B$events_rate_wm` events/animal/day; *p* `r B$events_p_text`). Daily intake was `r B$intake_wp` L/animal in W+ and `r B$intake_wm` L in W− (*p* `r B$intake_p_text` in the mixed model; *p* `r B$fmt_p(eu_intake$ls_water)` on group × period means), so the `r B$intake_diff` L/day gap `r if (B$intake_p < 0.05) "was significant" else "was not significant in the mixed model"`.
+
+Within individual drinking bouts:
+
+| Variable                         | W+                | W−                | *p*                  |
+|----------------------------------|------------------:|------------------:|----------------------|
+| Duration (s, geometric mean)     | `r B$dt_wp`       | `r B$dt_wm`       | `r pv(B$dt_p_text)`  |
+| Sips per event                   | `r B$sips_wp`     | `r B$sips_wm`     | `r pv(B$sips_p_text)` |
+| Sip rate (sips/s)                | `r B$sr_wp`       | `r B$sr_wm`       | `r pv(B$sr_p_text)`  |
+
+Restricted animals took `r if (B$sips_p < 0.05) "more" else "a similar number of"` sips per bout, `r if (B$dt_p < 0.05) "drank for longer" else "with bouts that were not significantly longer"`, and drank at `r if (B$sr_p < 0.05) "a different" else "the same"` sip rate. Any compensation therefore came from the number of sips per visit, not from drinking faster.
+
+---
+
+## 5 · Water-Restricted Animals Used Shade More
+
+Among S+ treatments, animals with restricted water (S+W−) spent `r if (B$shade_p < 0.05) "a significantly greater" else "a similar"` proportion of daytime scans in shade than ad libitum animals (`r scales::percent(B$prop_spwm, accuracy = 0.1)` vs `r scales::percent(B$prop_spwp, accuracy = 0.1)`; *p* `r B$shade_p_text`). The difference came mainly from the morning (`r B$shade_morning_span`: `r B$shade_diff_morning` percentage points more shade in S+W−), when W− animals could not drink. The `r paste0(B$clock_labels[B$shade_excluded_hours], "h", collapse = " and ")` scan blocks were excluded from this comparison because S+W− animals were in the trough corridor at those times.
+
+---
+
+## 6 · Body Surface Temperature: Shade Mattered, Water Did Not
+
+Flank surface temperature (right and left flank averaged) was **`r TH$bt_spwp` °C** in S+W+ and **`r TH$bt_spwm` °C** in S+W−, against **`r TH$bt_smwp` °C** in S−W+ and **`r TH$bt_smwm` °C** in S−W− (EMM ± SE; treatment *p* `r TH$thermo_trt_p_text`). In the factorial model, the shade effect had *p* `r TH$thermo_fact_shade_p` and the water effect *p* `r TH$thermo_fact_water_p` (interaction *p* `r TH$thermo_fact_int_p`).
+
+Time of day had a large effect: flank temperature was `r TH$bt_10` °C at 10:00h, `r TH$bt_13` °C at 13:00h and `r TH$bt_16` °C at 16:00h (*p* `r TH$thermo_clock_p_text`).
+
+Coat color `r if (TH$coat_animal_sig) "affected" else "did not clearly affect"` surface temperature when tested on one mean per animal (n = `r nrow(TH$animal_means)`; `r TH$coat_animal_f`): black `r TH$bt_black` °C, red `r TH$bt_red` °C and cream `r TH$bt_cream` °C (EMM ± SE from the mixed model; black vs cream *p* `r TH$coat_animal_p_bc`, black vs red *p* `r TH$coat_animal_p_br`). Breed `r if (TH$breed_animal_aov["breed", "Pr(>F)"] < 0.05) "also had an effect" else "had no detectable effect"` (`r TH$breed_animal_f`). All red animals were Braford and all black and cream animals were Jersey, so coat and breed effects cannot be fully separated.
+
+---
+
+## 7 · Integrated Interpretation
+
+Shade lowered the thermal load and the animals' body surface temperature, and it supported daytime grazing — but only when water was freely available. Water restriction reduced daytime grazing, raised daytime standing, cut drinking frequency, and increased the use of shade in the morning. S+W− animals grazed most at night, which suggests they recovered part of the daytime grazing they lost.
+
+Together, these results indicate that **shade and water act through different but interacting pathways**: shade changes the thermal microenvironment, while water availability limits how much of that benefit the animals can turn into grazing. Neither resource alone was enough to fully support behavior under the conditions observed.
+
+::: {.callout-warning appearance="minimal"}
+**Experimental unit.** Treatments were applied to `r nlevels(B$intake$group)` groups over `r nlevels(B$intake$period)` periods, so there are only `r B$eu_compare$n_units[1]` experimental units. When every outcome was analysed on group × period means (Latin square, `r B$eu_compare$df_error[1]` error df), `r B$eu_n_tests - B$eu_n_flip` of `r B$eu_n_tests` tests agreed with the mixed models at the 0.05 level (Behavior page, Table 47a).
+:::
+
+::: {.callout-note}
+**Next:** [Manuscript →](manuscript/Prettoetal_paper.qmd)
+:::

@@ -1,0 +1,1898 @@
+---
+title: "Thermal Comfort"
+subtitle: "How shade and water access shapes the thermal environment and cattle body temperature?"
+---
+
+```{r setup}
+#| include: false
+#| cache: false   # options (emm_options) and packages must be set on every render
+
+library(tidyverse)
+library(lme4)
+library(lmerTest)
+library(emmeans)
+library(ggplot2)
+library(plotly)
+library(rstatix)
+library(knitr)
+library(kableExtra)
+library(readxl)
+library(multcomp)
+library(patchwork)
+
+select <- dplyr::select
+
+# ── Denominator df for emmeans on LMMs ────────────────────────────────────────
+# Animal-level models use Satterthwaite df: the experimental unit is
+# group × period (16 units), not the image.
+emm_options(lmer.df = "satterthwaite", lmerTest.limit = 1e5, pbkrtest.limit = 0)
+
+# ── Model fitting with convergence / singularity handling ─────────────────────
+# Fits the LMM (lmer) or, when `family` is given, the GLMM (glmer). On a
+# convergence warning or singular fit, refits with bobyqa; if still singular,
+# drops random terms with zero variance (never group:period) and records what
+# was done in `model_log`, together with the final random-effect variances.
+model_log <- tibble(model = character(), status = character(), action = character(),
+                    final = character())
+
+# `keep` lists random terms that are never dropped, even with zero variance.
+fit_mm <- function(formula, data, label, family = NULL, keep = "group:period") {
+  f_txt <- paste(deparse(formula, width.cutoff = 500), collapse = " ")
+  ctrl_bobyqa <- if (is.null(family)) lmerControl(optimizer = "bobyqa") else glmerControl(optimizer = "bobyqa")
+  fit <- function(f, ctrl = NULL) {
+    msgs <- character()
+    m <- withCallingHandlers(
+      if (is.null(family)) {
+        lmer(as.formula(f), data = data, control = ctrl %||% lmerControl())
+      } else {
+        glmer(as.formula(f), data = data, family = family, control = ctrl %||% glmerControl())
+      },
+      warning = function(w) { msgs <<- c(msgs, conditionMessage(w)); invokeRestart("muffleWarning") }
+    )
+    conv <- c(msgs, m@optinfo$conv$lme4$messages)
+    list(m = m, conv = conv[!str_detect(conv, "singular")])
+  }
+  res    <- fit(f_txt)
+  status <- c(if (length(res$conv)) "convergence warning", if (isSingular(res$m)) "singular")
+  action <- character()
+  if (length(status)) {
+    res    <- fit(f_txt, ctrl_bobyqa)
+    action <- "refit with bobyqa"
+    if (isSingular(res$m)) {
+      vc   <- as.data.frame(VarCorr(res$m))
+      zero <- setdiff(vc$grp[vc$vcov < 1e-8], c("Residual", keep))
+      if (length(zero)) {
+        for (z in zero) f_txt <- str_remove(f_txt, fixed(paste0(" + (1 | ", z, ")")))
+        res    <- fit(f_txt, ctrl_bobyqa)
+        action <- c(action, paste0("dropped zero-variance term(s): ", paste(zero, collapse = ", ")))
+      }
+      if (isSingular(res$m)) {
+        vc_k   <- as.data.frame(VarCorr(res$m))
+        zero_k <- intersect(vc_k$grp[vc_k$vcov < 1e-8], keep)
+        if (length(zero_k))
+          action <- c(action, paste0(paste(zero_k, collapse = ", "), " variance ≈ 0 (retained by design)"))
+      }
+    }
+    if (length(res$conv)) action <- c(action, paste("still:", paste(unique(res$conv), collapse = " / ")))
+  }
+  vc_final <- as.data.frame(VarCorr(res$m))
+  model_log <<- bind_rows(model_log, tibble(
+    model  = label,
+    status = if (length(status)) paste(status, collapse = " + ") else "OK",
+    action = if (length(action)) paste(action, collapse = "; ") else "—",
+    final  = paste0(vc_final$grp, " = ", signif(vc_final$vcov, 3), collapse = "; ")
+  ))
+  res$m
+}
+
+# ── p-value formatting for inline text ────────────────────────────────────────
+fmt_p <- function(p) ifelse(p < 0.001, "< 0.001", paste("=", formatC(p, format = "f", digits = 3)))
+
+# ── Color palette ─────────────────────────────────────────────────────────────
+pal_treatment <- c(
+  "S+W+" = "#2C4A2E",
+  "S+W-" = "#4A7FA5",
+  "S-W+" = "#C8A84B",
+  "S-W-" = "#6B4C35"
+)
+
+pal_sun_shade <- c("Sun" = "#C8A84B", "Shade" = "#2C4A2E")
+
+pal_location <- c(
+  "shade"             = "#2C4A2E",
+  "sun_between_trees" = "#E07B30",
+  "full_sun"          = "#F5C518"
+)
+
+theme_ws <- function() {
+  theme_classic(base_family = "sans", base_size = 12) +
+    theme(
+      plot.title         = element_text(face = "bold", color = "#2C4A2E", size = 13),
+      plot.subtitle      = element_text(color = "#6B6B6B", size = 11),
+      axis.title         = element_text(color = "#2A2A2A", size = 11),
+      axis.text          = element_text(color = "#2A2A2A"),
+      legend.title       = element_text(face = "bold", size = 10),
+      legend.position    = "bottom",
+      panel.grid.major.y = element_line(color = "#DDD5C4", linewidth = 0.4),
+      strip.background   = element_rect(fill = "#F5F0E8", color = "#DDD5C4"),
+      strip.text         = element_text(face = "bold", color = "#2C4A2E")
+    )
+}
+
+# ── BGHI comfort thresholds (Baeta & Souza, 2010; continuous bounds) ─────────
+# comfort ≤ 74; alert > 74–78; danger > 78–84; critical > 84.
+# Lines are drawn at the three bounds; labels sit inside each band.
+bghi_bounds <- tibble(
+  yintercept = c(74, 78, 84),
+  color      = c("#C8A84B", "#6B4C35", "#FF2800")
+)
+
+bghi_thresholds <- tibble(
+  label = c("Comfort ≤ 74", "Alert > 74–78", "Danger > 78–84", "Critical > 84"),
+  y     = c(72, 76, 81, 86),
+  color = c("#2C4A2E", "#C8A84B", "#6B4C35", "#FF2800")
+)
+
+# ── Hour label: observation hours → clock 09:00–18:00 ────────────────────────
+obs_to_clock <- function(h) {
+  sprintf("%02d:00", (h + 6) %% 24)
+}
+
+# ── Helper: extract emmeans comparison table ──────────────────────────────────
+emm_table <- function(model, factor_name) {
+  emm  <- emmeans(model, as.formula(paste("~", factor_name)))
+  cont <- pairs(emm, adjust = "tukey")
+
+  emm_df <- as.data.frame(emm) %>%
+    rename(Level = 1, Mean = emmean) %>%
+    select(Level, Mean, SE, lower.CL, upper.CL) %>%
+    mutate(across(where(is.numeric), ~ round(., 3)))
+
+  cont_df <- as.data.frame(cont) %>%
+    rename(Comparison = contrast, Estimate = estimate,
+           SE_c = SE, `t / z` = t.ratio, `p-value` = p.value) %>%
+    select(Comparison, Estimate, SE_c, `t / z`, `p-value`) %>%
+    mutate(
+      across(where(is.numeric), ~ round(., 4)),
+      Sig = case_when(
+        `p-value` < 0.001 ~ "***",
+        `p-value` < 0.01  ~ "**",
+        `p-value` < 0.05  ~ "*",
+        `p-value` < 0.1   ~ ".",
+        TRUE               ~ "ns"
+      )
+    )
+  list(means = emm_df, contrasts = cont_df)
+}
+
+# ── Data loading ──────────────────────────────────────────────────────────────
+climate <- read_excel("data/climate_data.xlsx") %>%
+  mutate(
+    period = as.factor(period),
+    day    = as.factor(day),
+    hour   = as.integer(hour),
+    clock  = obs_to_clock(hour)
+  )
+
+soil <- read_excel("data/soil_temp.xlsx") %>%
+  mutate(
+    soil_location = factor(soil_location,
+                           levels = c("shade", "sun_between_trees", "full_sun")),
+    period = as.factor(period),
+    day    = as.factor(day),
+    hour   = as.integer(hour)
+  )
+
+thermo <- read_excel("data/thermography.xlsx") %>%
+  mutate(
+    treatment  = factor(treatment, levels = c("S+W+", "S+W-", "S-W+", "S-W-")),
+    shade      = factor(if_else(str_detect(as.character(treatment), "S\\+"), "S+", "S-"),
+                        levels = c("S+", "S-")),
+    water      = factor(if_else(str_detect(as.character(treatment), "W\\+"), "W+", "W-"),
+                        levels = c("W+", "W-")),
+    group      = factor(group),
+    period     = as.factor(period),
+    day        = as.factor(day),
+    animal_id  = factor(animal_id),
+    body_part  = factor(body_part),
+    breed      = factor(breed),
+    coat_color = factor(coat_color),
+    hour       = as.integer(hour),
+    clock      = obs_to_clock(hour),
+    body_temp  = (temp_mean + temp_max) / 2
+  )
+
+# Flank temperature: right and left flank averaged per animal × day × capture
+# time, so each image pair counts once (not twice) in the models.
+thermo_flanks <- thermo %>%
+  filter(body_part %in% c("right_side", "left_side")) %>%
+  group_by(treatment, shade, water, group, period, day, hour, clock,
+           animal_id, breed, coat_color) %>%
+  summarise(n_flanks  = sum(!is.na(body_temp)),
+            body_temp = mean(body_temp, na.rm = TRUE), .groups = "drop")
+
+# Pre-compute key values for inline use
+globe_sun_peak  <- climate %>%
+  filter(!is.na(globe_temp_sun)) %>%
+  slice_max(globe_temp_sun, n = 1)
+
+globe_shade_at_peak <- climate %>%
+  filter(hour == globe_sun_peak$hour[1]) %>%
+  summarise(m = mean(globe_temp_shade, na.rm = TRUE)) %>% pull(m)
+
+bghi_sun_mean   <- mean(climate$bghi_sun,   na.rm = TRUE)
+bghi_shade_mean <- mean(climate$bghi_shade, na.rm = TRUE)
+RTL_sun_peak    <- max(climate$rtl_sun, na.rm = TRUE)
+RTL_shade_at_peak <- climate %>%
+  filter(hour == which.max(climate$rtl_sun)) %>%
+  summarise(m = mean(rtl_shade, na.rm = TRUE)) %>% pull(m)
+```
+
+# 1 · Meteorological Context
+
+```{r}
+#| code-summary: "Meteorological descriptive summary by period"
+
+meteo_summary <- climate %>%
+  group_by(period) %>%
+  summarise(
+    `Mean Temp (°C)`    = round(mean(air_temp_mean,    na.rm = TRUE), 1),
+    `Max Temp (°C)`     = round(max(air_temp_max,      na.rm = TRUE), 1),
+    `Mean RH (%)`       = round(mean(rh_mean,          na.rm = TRUE), 1),
+    `Total Precip (mm)` = round(sum(precipitation_mm,  na.rm = TRUE), 1),
+    `Mean Wind (m/s)`   = round(mean(wind_speed,       na.rm = TRUE), 2),
+    .groups = "drop"
+  ) %>%
+  rename(Period = period)
+
+meteo_summary %>%
+  kbl(caption = "Table 1. Meteorological summary by experimental period.") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+```
+
+```{r}
+#| include: false
+
+mean_temp  <- round(mean(climate$air_temp_mean, na.rm = TRUE), 1)
+max_temp   <- round(max(climate$air_temp_max,   na.rm = TRUE), 1)
+min_temp   <- round(min(climate$air_temp_min,   na.rm = TRUE), 1)
+mean_rh    <- round(mean(climate$rh_mean,        na.rm = TRUE), 1)
+total_prec <- round(sum(climate$precipitation_mm, na.rm = TRUE), 1)
+```
+
+Mean air temperature was `r mean_temp` °C (range: `r min_temp`–`r max_temp` °C), with mean relative humidity of `r mean_rh`% and total precipitation of `r total_prec` mm across all periods.
+
+# 2 · Black Globe Temperature
+
+Black globe thermometers were installed at 1 m height in both shaded and unshaded paddocks, recording every 5 minutes from 08:00 to 18:00h.
+
+```{r}
+#| code-summary: "Black globe temperature — descriptive table"
+
+globe_summary_tbl <- climate %>%
+  select(hour, globe_temp_sun, globe_temp_shade) %>%
+  pivot_longer(c(globe_temp_sun, globe_temp_shade),
+               names_to = "location", values_to = "globe_temp") %>%
+  mutate(location = recode(location,
+    "globe_temp_sun"   = "Sun",
+    "globe_temp_shade" = "Shade")) %>%
+  group_by(location) %>%
+  summarise(
+    Mean  = round(mean(globe_temp, na.rm = TRUE), 2),
+    SD    = round(sd(globe_temp,   na.rm = TRUE), 2),
+    Min   = round(min(globe_temp,  na.rm = TRUE), 2),
+    Max   = round(max(globe_temp,  na.rm = TRUE), 2),
+    .groups = "drop"
+  ) %>% rename(Location = location)
+
+globe_summary_tbl %>%
+  kbl(caption = "Table 2. Black globe temperature (°C) in sun and shade conditions.") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+```
+
+```{r}
+#| code-summary: "LMM — black globe temperature: sun vs shade"
+
+globe_long <- climate %>%
+  select(period, day, hour, globe_temp_sun, globe_temp_shade) %>%
+  pivot_longer(c(globe_temp_sun, globe_temp_shade),
+               names_to = "location", values_to = "globe_temp") %>%
+  mutate(
+    location = recode(location,
+      "globe_temp_sun"   = "Sun",
+      "globe_temp_shade" = "Shade"),
+    day  = as.factor(day),
+    hour = as.factor(hour)
+  )
+
+model_globe <- lmer(
+  globe_temp ~ location + period + (1 | day / hour),
+  data = globe_long
+)
+
+globe_emm <- emm_table(model_globe, "location")
+
+globe_emm$means %>%
+  kbl(caption = "Table 3. Estimated marginal means — black globe temperature by location.",
+      digits = 3) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+
+globe_emm$contrasts %>%
+  kbl(caption = "Table 4. Pairwise contrasts — black globe temperature.",
+      digits = 4) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+```
+
+```{r}
+#| code-summary: "Black globe temperature — time-series plot"
+#| fig-cap: "Figure 1. Mean black globe temperature (°C) by hour in sun and shade conditions. Ribbons = ±1 SD."
+
+globe_ts <- climate %>%
+  select(hour, clock, globe_temp_sun, globe_temp_shade) %>%
+  pivot_longer(c(globe_temp_sun, globe_temp_shade),
+               names_to = "location", values_to = "globe_temp") %>%
+  mutate(location = recode(location,
+    "globe_temp_sun"   = "Sun",
+    "globe_temp_shade" = "Shade")) %>%
+  group_by(hour, clock, location) %>%
+  summarise(
+    mean = mean(globe_temp, na.rm = TRUE),
+    sd   = sd(globe_temp,   na.rm = TRUE),
+    .groups = "drop"
+  )
+
+p_globe <- ggplot(globe_ts,
+                  aes(x = hour, y = mean,
+                      color = location, fill = location)) +
+  geom_ribbon(aes(ymin = mean - sd, ymax = mean + sd),
+              alpha = 0.15, color = NA) +
+  geom_line(linewidth = 1.2) +
+  geom_point(size = 2.5) +
+  scale_x_continuous(breaks = 0:23, labels = obs_to_clock(0:23)) +
+  scale_color_manual(values = pal_sun_shade) +
+  scale_fill_manual( values = pal_sun_shade) +
+  labs(x = "Time of day", y = "Black globe temperature (°C)",
+       color = NULL, fill = NULL) +
+  theme_ws() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggplotly(p_globe, tooltip = c("x", "y", "color")) %>%
+  layout(legend = list(orientation = "h", x = 0.3, y = -0.25))
+```
+
+```{r}
+#| include: false
+
+g_sun    <- round(globe_emm$means$Mean[globe_emm$means$Level == "Sun"],   2)
+g_shade  <- round(globe_emm$means$Mean[globe_emm$means$Level == "Shade"], 2)
+g_diff   <- round(g_sun - g_shade, 2)
+g_p <- globe_emm$contrasts$`p-value`[1]
+g_p_text <- ifelse(g_p < 0.001, "< 0.001",
+                 formatC(g_p, format = "f", digits = 3))
+```
+
+Black globe temperatures in sun were on average `r g_sun` °C compared to `r g_shade` °C in shade — a mean difference of `r g_diff` °C (p `r g_p_text`). Peak globe temperature in the sun reached `r round(max(climate$globe_temp_sun, na.rm=TRUE), 1)` °C at `r obs_to_clock(globe_sun_peak$hour[1])`, compared to `r round(globe_shade_at_peak, 1)` °C in shade at the same hour.
+
+# 3 · Thermal Comfort Indices
+
+## 3.1 · BGHI — Black globe-humidity index
+
+The BGHI (Black globe-humidity index) is the primary thermal stress index for cattle in tropical conditions.
+Thresholds follow Baeta & Souza (2010):
+    • ≤ 74 comfort;
+    • > 74–78 alert;
+    • > 78–84 danger;
+    • > 84 critical.
+
+```{r}
+#| code-summary: "BGHI — descriptive table by location"
+
+bghi_tbl <- climate %>%
+  select(hour, bghi_sun, bghi_shade) %>%
+  pivot_longer(c(bghi_sun, bghi_shade),
+               names_to = "location", values_to = "bghi") %>%
+  mutate(location = recode(location,
+    "bghi_sun"   = "Sun",
+    "bghi_shade" = "Shade")) %>%
+  group_by(location) %>%
+  summarise(
+    Mean  = round(mean(bghi, na.rm = TRUE), 2),
+    SD    = round(sd(bghi,   na.rm = TRUE), 2),
+    Min   = round(min(bghi,  na.rm = TRUE), 2),
+    Max   = round(max(bghi,  na.rm = TRUE), 2),
+    `Hours >84 (critical)` = sum(bghi > 84, na.rm = TRUE),
+    `Hours >78 (danger+)`  = sum(bghi > 78, na.rm = TRUE),
+    .groups = "drop"
+  ) %>% rename(Location = location)
+
+bghi_tbl %>%
+  kbl(caption = "Table 5. BGHI (±SD) and hours exceeding thermal thresholds by location.") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+```
+
+```{r}
+#| code-summary: "LMM — BGHI: sun vs shade model and contrasts"
+
+bghi_long <- climate %>%
+  select(period, day, hour, bghi_sun, bghi_shade) %>%
+  pivot_longer(c(bghi_sun, bghi_shade),
+               names_to = "location", values_to = "bghi") %>%
+  mutate(
+    location = recode(location,
+      "bghi_sun"   = "Sun",
+      "bghi_shade" = "Shade"),
+    day  = as.factor(day),
+    hour = as.factor(hour)
+  )
+
+model_bghi <- lmer(
+  bghi ~ location + period + (1 | day / hour),
+  data = bghi_long
+)
+
+bghi_emm <- emm_table(model_bghi, "location")
+
+bghi_emm$means %>%
+  kbl(caption = "Table 6. Estimated marginal means — BGHI by location.",
+      digits = 3) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+
+bghi_emm$contrasts %>%
+  kbl(caption = "Table 7. Pairwise contrasts — BGHI sun vs shade.",
+      digits = 4) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+```
+
+```{r}
+#| code-summary: "BGHI time-series with threshold lines"
+#| fig-cap: "Figure 2. Mean hourly BGHI in sun and shade conditions. Dashed lines mark the thermal stress bounds at 74, 78 and 84: comfort ≤ 74; alert > 74–78; danger > 78–84; critical > 84. Ribbons represent maximum and minimum values for the relative time of day."
+
+bghi_ts <- climate %>%
+  select(hour, clock, bghi_sun, bghi_shade) %>%
+  pivot_longer(c(bghi_sun, bghi_shade),
+               names_to = "location", values_to = "bghi") %>%
+  mutate(location = recode(location,
+    "bghi_sun"   = "Sun",
+    "bghi_shade" = "Shade")) %>%
+  group_by(hour, clock, location) %>%
+  summarise(
+    mean = mean(bghi, na.rm = TRUE),
+    max   = max(bghi,   na.rm = TRUE),
+    min   = min(bghi,   na.rm = TRUE),
+    .groups = "drop"
+  )
+
+p_bghi <- ggplot(bghi_ts,
+                 aes(x = hour, y = mean,
+                     color = location, fill = location)) +
+  geom_ribbon(aes(ymin = min, ymax = max),
+              alpha = 0.15, color = NA, show.legend = FALSE) +
+  geom_hline(yintercept = bghi_bounds$yintercept,
+             linetype = "dashed",
+             color    = bghi_bounds$color,
+             linewidth = 0.7) +
+  annotate("text",
+           x     = 13.3,
+           y     = bghi_thresholds$y,
+           label = bghi_thresholds$label,
+           hjust = 0, size = 3,
+           color = bghi_thresholds$color) +
+  geom_line(linewidth = 1.2) +
+  geom_point(size = 2.5) +
+  scale_x_continuous(breaks = 0:23, labels = obs_to_clock(0:23)) +
+  scale_color_manual(values = pal_sun_shade) +
+  scale_fill_manual( values = pal_sun_shade) +
+  labs(x = "Time of day", y = "BGHI", color = NULL, fill = NULL) +
+  theme_ws() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggplotly(p_bghi, tooltip = c("x", "y", "color")) %>%
+  layout(legend = list(orientation = "h", x = 0.3, y = -0.25))
+```
+
+```{r}
+#| include: false
+
+bghi_sun_emm   <- round(bghi_emm$means$Mean[bghi_emm$means$Level == "Sun"],   2)
+bghi_shade_emm <- round(bghi_emm$means$Mean[bghi_emm$means$Level == "Shade"], 2)
+bghi_p         <- bghi_emm$contrasts$`p-value`[1]
+bghi_p_text    <- ifelse(bghi_p < 0.001, "< 0.001",
+                 formatC(bghi_p, format = "f", digits = 3))
+
+bghi_crit_hrs    <- bghi_tbl$`Hours >84 (critical)`[bghi_tbl$Location == "Sun"]
+bghi_alert_hrs   <- bghi_tbl$`Hours >78 (danger+)`[bghi_tbl$Location  == "Sun"]
+bghi_crit_hrs_sh <- bghi_tbl$`Hours >84 (critical)`[bghi_tbl$Location == "Shade"]
+bghi_alert_hrs_sh<- bghi_tbl$`Hours >78 (danger+)`[bghi_tbl$Location  == "Shade"]
+```
+
+In unshaded paddocks, mean BGHI was `r bghi_sun_emm` compared to `r bghi_shade_emm` in shade (p `r bghi_p_text`).
+Unshaded conditions exceeded the critical threshold (BGHI > 84) in `r bghi_crit_hrs` hourly observations, and reached danger or critical levels (BGHI > 78) in `r bghi_alert_hrs` observations.
+Shaded paddocks exceeded the critical threshold (BGHI > 84) in `r bghi_crit_hrs_sh` hourly observations, and reached danger or critical levels (BGHI > 78) in `r bghi_alert_hrs_sh` observations.
+
+## 3.2 · Radiant Thermal Load (RTL)
+
+```{r}
+#| code-summary: "RTL — descriptive table by location"
+
+RTL_tbl <- climate %>%
+  select(hour, rtl_sun, rtl_shade) %>%
+  pivot_longer(c(rtl_sun, rtl_shade),
+               names_to = "location", values_to = "RTL") %>%
+  mutate(location = recode(location,
+    "rtl_sun"   = "Sun",
+    "rtl_shade" = "Shade")) %>%
+  group_by(location) %>%
+  summarise(
+    Mean = round(mean(RTL, na.rm = TRUE), 1),
+    SD   = round(sd(RTL,   na.rm = TRUE), 1),
+    Min  = round(min(RTL,  na.rm = TRUE), 1),
+    Max  = round(max(RTL,  na.rm = TRUE), 1),
+    .groups = "drop"
+  ) %>% rename(Location = location)
+
+RTL_tbl %>%
+  kbl(caption = "Table 8. Radiant Thermal Load (W/m²) in sun and shade conditions.") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+```
+
+```{r}
+#| code-summary: "LMM — RTL: sun vs shade model and contrasts"
+
+RTL_long <- climate %>%
+  select(period, day, hour, rtl_sun, rtl_shade) %>%
+  pivot_longer(c(rtl_sun, rtl_shade),
+               names_to = "location", values_to = "RTL") %>%
+  mutate(
+    location = recode(location,
+      "rtl_sun"   = "Sun",
+      "rtl_shade" = "Shade"),
+    day  = as.factor(day),
+    hour = as.factor(hour)
+  )
+
+model_rtl <- lmer(
+  RTL ~ location + period + (1 | day / hour),
+  data = RTL_long
+)
+
+rtl_emm <- emm_table(model_rtl, "location")
+
+rtl_emm$means %>%
+  kbl(caption = "Table 9. Estimated marginal means — RTL by location.",
+      digits = 2) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+
+rtl_emm$contrasts %>%
+  kbl(caption = "Table 10. Pairwise contrasts — RTL sun vs shade.",
+      digits = 4) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+```
+
+```{r}
+#| code-summary: "RTL time-series sun vs shade"
+#| fig-cap: "Figure 3. Mean hourly Radiant Thermal Load (W/m²) in sun and shade. Ribbons represent ± SD."
+
+RTL_ts <- climate %>%
+  select(hour, clock, rtl_sun, rtl_shade) %>%
+  pivot_longer(c(rtl_sun, rtl_shade),
+               names_to = "location", values_to = "RTL") %>%
+  mutate(location = recode(location,
+    "rtl_sun"   = "Sun",
+    "rtl_shade" = "Shade")) %>%
+  group_by(hour, clock, location) %>%
+  summarise(
+    mean = mean(RTL, na.rm = TRUE),
+    sd   = sd(RTL,   na.rm = TRUE),
+    .groups = "drop"
+  )
+
+p_RTL <- ggplot(RTL_ts,
+                aes(x = hour, y = mean,
+                    color = location, fill = location)) +
+  geom_ribbon(aes(ymin = mean - sd, ymax = mean + sd),
+              alpha = 0.15, color = NA) +
+  geom_line(linewidth = 1.2) +
+  geom_point(size = 2.5) +
+  scale_x_continuous(breaks = 0:23, labels = obs_to_clock(0:23)) +
+  scale_color_manual(values = pal_sun_shade) +
+  scale_fill_manual( values = pal_sun_shade) +
+  labs(x = "Time of day", y = "RTL (W/m²)",
+       color = NULL, fill = NULL) +
+  theme_ws() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggplotly(p_RTL, tooltip = c("x", "y", "color")) %>%
+  layout(legend = list(orientation = "h", x = 0.3, y = -0.25))
+```
+
+```{r}
+#| include: false
+
+rtl_sun_emm   <- round(rtl_emm$means$Mean[rtl_emm$means$Level == "Sun"],   1)
+rtl_shade_emm <- round(rtl_emm$means$Mean[rtl_emm$means$Level == "Shade"], 1)
+rtl_pct_red   <- round((1 - rtl_shade_emm / rtl_sun_emm) * 100, 1)
+rtl_p         <- rtl_emm$contrasts$`p-value`[1]
+rtl_p_text    <- ifelse(rtl_p < 0.001, "< 0.001",
+                 formatC(rtl_p, format = "f", digits = 3))
+```
+
+Mean RTL in sun was `r rtl_sun_emm` W/m² compared to `r rtl_shade_emm` W/m² in shade, representing a reduction of `r rtl_pct_red`% (p `r rtl_p_text`). Peak RTL in unshaded areas reached `r round(max(climate$rtl_sun, na.rm=TRUE), 1)` W/m².
+
+# 4 · Soil Surface Temperature
+
+Soil surface temperature was measured hourly (09:00–18:00h) at three location types: full sun, sun between trees, and under tree canopy. These measurements capture the immediate thermal environment experienced by resting cattle at ground level.
+
+```{r}
+#| code-summary: "Soil temperature — descriptive table by location"
+
+soil_tbl <- soil %>%
+  group_by(soil_location) %>%
+  summarise(
+    Mean = round(mean(soil_temp_mean, na.rm = TRUE), 2),
+    SD   = round(sd(soil_temp_mean,   na.rm = TRUE), 2),
+    Min  = round(min(soil_temp_mean,  na.rm = TRUE), 2),
+    Max  = round(max(soil_temp_mean,  na.rm = TRUE), 2),
+    .groups = "drop"
+  ) %>%
+  mutate(soil_location = recode(soil_location,
+    "shade"             = "Shade",
+    "sun_between_trees" = "Sun between trees",
+    "full_sun"          = "Full sun"
+  )) %>%
+  rename(Location = soil_location)
+
+soil_tbl %>%
+  kbl(caption = "Table 11. Soil surface temperature (°C) by location.") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+```
+
+```{r}
+#| code-summary: "LMM — soil temperature by location with pairwise contrasts"
+
+model_soil <- lmer(
+  soil_temp_mean ~ soil_location + period + (1 | day / hour),
+  data = soil
+)
+
+soil_emm <- emm_table(model_soil, "soil_location")
+
+soil_emm$means %>%
+  mutate(Level = recode(Level,
+    "shade"             = "Shade",
+    "sun_between_trees" = "Sun between trees",
+    "full_sun"          = "Full sun"
+  )) %>%
+  kbl(caption = "Table 12. Estimated marginal means — soil surface temperature by location.",
+      digits = 3) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+
+soil_emm$contrasts %>%
+  mutate(Comparison = str_replace_all(Comparison,
+    c("shade" = "Shade",
+      "sun_between_trees" = "Sun between trees",
+      "full_sun" = "Full sun"))) %>%
+  kbl(caption = "Table 13. Pairwise contrasts — soil surface temperature.",
+      digits = 4) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+```
+
+```{r}
+#| code-summary: "Soil temperature by location and hour"
+#| fig-cap: "Figure 4. Mean hourly soil surface temperature (°C) by measurement location. Ribbons represent ± SD."
+
+soil_ts <- soil %>%
+  group_by(hour, soil_location) %>%
+  summarise(
+    mean = mean(soil_temp_mean, na.rm = TRUE),
+    sd   = sd(soil_temp_mean,   na.rm = TRUE),
+    .groups = "drop"
+  )
+
+p_soil <- ggplot(soil_ts,
+                 aes(x = hour, y = mean,
+                     color = soil_location, fill = soil_location)) +
+  geom_ribbon(aes(ymin = mean - sd, ymax = mean + sd),
+              alpha = 0.2, color = NA) +
+  geom_line(linewidth = 1.2) +
+  geom_point(size = 2.5) +
+  scale_x_continuous(breaks = 0:23, labels = obs_to_clock(0:23)) +
+  scale_color_manual(
+    values = pal_location,
+    labels = c("Shade", "Sun between trees", "Full sun")
+  ) +
+  scale_fill_manual(
+    values = pal_location,
+    labels = c("Shade", "Sun between trees", "Full sun")
+  ) +
+  labs(x = "Time of day", y = "Soil surface temperature (°C)",
+       color = NULL, fill = NULL) +
+  theme_ws() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggplotly(p_soil, tooltip = c("x", "y", "color")) %>%
+  layout(legend = list(orientation = "h", x = 0.1, y = -0.25))
+```
+
+```{r}
+#| include: false
+
+soil_shade_m <- round(soil_emm$means$Mean[soil_emm$means$Level == "shade"], 2)
+soil_sbt_m   <- round(soil_emm$means$Mean[soil_emm$means$Level == "sun_between_trees"], 2)
+soil_sun_m   <- round(soil_emm$means$Mean[soil_emm$means$Level == "full_sun"], 2)
+
+soil_p_shade_sun <- soil_emm$contrasts %>%
+  filter(str_detect(Comparison, "shade") & str_detect(Comparison, "full_sun")) %>%
+  pull(`p-value`)
+
+soil_p_shade_sun_text <- ifelse(soil_p_shade_sun < 0.001, "< 0.001",
+                 formatC(soil_p_shade_sun, format = "f", digits = 3))
+
+soil_p_shade_sbt <- soil_emm$contrasts %>%
+  filter(str_detect(Comparison, "shade") & str_detect(Comparison, "sun_between")) %>%
+  pull(`p-value`)
+
+soil_p_shade_sbt_text <- ifelse(soil_p_shade_sbt < 0.001, "< 0.001",
+                 formatC(soil_p_shade_sbt, format = "f", digits = 3))
+```
+
+The LMM used lmer() (lmerTest) with soil_location as a fixed effect and period as a fixed effect, with day/hour as nested random effects, producing t-tests with Satterthwaite degrees of freedom.
+Shade was the reference level: sun between trees was `r round(soil_sbt_m - soil_shade_m, 2)` °C warmer (p `r soil_p_shade_sbt_text`) and full sun was `r round(soil_sun_m - soil_shade_m, 2)` °C warmer (p `r soil_p_shade_sun_text`).
+Mean soil temperature was `r soil_shade_m` °C in shade, `r soil_sbt_m` °C in sun between trees, and `r soil_sun_m` °C in full sun.
+
+# 5 · Thermography
+
+Thermographic images were obtained from 16 cows (4 per group: 2 Braford, 2 Jersey) at 10:00, 13:00, and 16:00h. Body temperature was calculated as (temp_mean + temp_max) / 2 following Montanholi et al. (2008). Four anatomical regions were assessed: right side (flank), left side (flank), eye, and udder. For flank analyses, the right and left flank values are **averaged per animal × day × capture time**, so each animal contributes one flank value per capture (not two).
+
+All animal-level thermography models include `(1 | group) + (1 | group:period) + (1 | animal_id) + (1 | day)`, with period as a fixed effect. Model-based results are reported as estimated marginal means (EMM) ± SE; descriptive tables report raw mean ± SD.
+
+## 5.1 · Body Temperature by Treatment and Capture Time
+
+```{r}
+#| code-summary: "Thermography — descriptive table by treatment (flanks averaged)"
+
+thermo_flanks %>%
+  group_by(treatment) %>%
+  summarise(
+    n    = n(),
+    Mean = round(mean(body_temp, na.rm = TRUE), 3),
+    SD   = round(sd(body_temp,   na.rm = TRUE), 3),
+    Min  = round(min(body_temp,  na.rm = TRUE), 3),
+    Max  = round(max(body_temp,  na.rm = TRUE), 3),
+    .groups = "drop"
+  ) %>%
+  rename(Treatment = treatment) %>%
+  kbl(caption = "Table 14. Raw flank body surface temperature (°C) by treatment (mean ± SD; n = animal × day × capture time).") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+```
+
+A single model estimates treatment and capture-time effects together:
+
+`body_temp ~ treatment + clock + period + (1 | group) + (1 | group:period) + (1 | animal_id) + (1 | day)`
+
+```{r}
+#| code-summary: "LMM — body temperature ~ treatment + capture time (one model)"
+
+model_thermo <- fit_mm(
+  body_temp ~ treatment + clock + period + (1 | group) + (1 | group:period) + (1 | animal_id) + (1 | day),
+  data = thermo_flanks, label = "model_thermo (treatment + clock)"
+)
+
+thermo_anova <- anova(model_thermo)
+
+thermo_anova %>%
+  as.data.frame() %>%
+  rownames_to_column("Term") %>%
+  transmute(Term, `Num df` = NumDF, `Den df` = round(DenDF, 1),
+            F = round(`F value`, 3), `p-value` = signif(`Pr(>F)`, 3)) %>%
+  kbl(caption = "Table 15. Type III F tests (Satterthwaite) — body temperature ~ treatment + capture time.") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+
+trat_emm <- emm_table(model_thermo, "treatment")
+
+trat_emm$means %>%
+  rename(Treatment = Level, EMM = Mean) %>%
+  kbl(caption = "Table 16. Estimated marginal means (EMM ± SE) — body temperature by treatment (averaged over capture time).",
+      digits = 3) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+
+trat_emm$contrasts %>%
+  kbl(caption = "Table 17. Tukey pairwise contrasts — body temperature by treatment.",
+      digits = 4) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+
+hour_emm <- emm_table(model_thermo, "clock")
+
+hour_emm$means %>%
+  rename(`Capture time` = Level, EMM = Mean) %>%
+  kbl(caption = "Table 18. Estimated marginal means (EMM ± SE) — body temperature by capture time (averaged over treatment).",
+      digits = 3) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+
+hour_emm$contrasts %>%
+  kbl(caption = "Table 19. Tukey pairwise contrasts — body temperature across capture times.",
+      digits = 4) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+```
+
+```{r}
+#| code-summary: "Body temperature by treatment — boxplot"
+#| fig-cap: "Figure 6. Flank body surface temperature (°C; mean of right and left flank) by treatment."
+
+p_thermo_trat <- ggplot(thermo_flanks,
+                        aes(x = treatment, y = body_temp, fill = treatment)) +
+  geom_boxplot(alpha = 0.7, outlier.shape = 21, outlier.size = 1.5) +
+  geom_jitter(width = 0.15, alpha = 0.25, size = 1) +
+  scale_fill_manual(values = pal_treatment) +
+  labs(x = "Treatment", y = "Body surface temperature (°C)", fill = NULL) +
+  theme_ws() +
+  theme(legend.position = "none")
+
+ggplotly(p_thermo_trat, tooltip = c("x", "y"))
+```
+
+```{r}
+#| code-summary: "Body temperature by capture time — descriptive table"
+
+thermo_flanks %>%
+  group_by(clock) %>%
+  summarise(
+    n    = n(),
+    Mean = round(mean(body_temp, na.rm = TRUE), 3),
+    SD   = round(sd(body_temp,   na.rm = TRUE), 3),
+    .groups = "drop"
+  ) %>%
+  rename(`Capture time` = clock) %>%
+  kbl(caption = "Table 19a. Raw flank body surface temperature (°C) at each capture time (mean ± SD).") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+```
+
+```{r}
+#| code-summary: "Body temperature by time of day and treatment — line plot"
+#| fig-cap: "Figure 7. Raw mean flank body surface temperature (°C) at 10:00, 13:00, and 16:00h by treatment. Error bars = SD."
+
+thermo_hour_sum <- thermo_flanks %>%
+  group_by(treatment, hour, clock) %>%
+  summarise(
+    mean = mean(body_temp, na.rm = TRUE),
+    sd   = sd(body_temp,   na.rm = TRUE),
+    .groups = "drop"
+  )
+
+p_thermo_hour <- ggplot(thermo_hour_sum,
+                        aes(x = clock, y = mean,
+                            color = treatment, group = treatment)) +
+  geom_errorbar(aes(ymin = mean - sd, ymax = mean + sd),
+                width = 0.15, alpha = 0.6) +
+  geom_line(linewidth = 1.1) +
+  geom_point(size = 3) +
+  scale_color_manual(values = pal_treatment) +
+  labs(x = "Time of day", y = "Body surface temperature (°C)",
+       color = "Treatment")
+
+ggplotly(p_thermo_hour, tooltip = c("x", "y", "color")) %>%
+  layout(legend = list(orientation = "h", x = 0.2, y = -0.2))
+```
+
+## 5.2 · Treatment × Capture Time
+
+Additional analysis: does the treatment effect change across the day?
+
+`body_temp ~ treatment * clock + period + (1 | group) + (1 | group:period) + (1 | animal_id) + (1 | day)`
+
+```{r}
+#| code-summary: "LMM — treatment × capture time interaction (joint tests)"
+
+model_thermo_int <- fit_mm(
+  body_temp ~ treatment * clock + period + (1 | group) + (1 | group:period) + (1 | animal_id) + (1 | day),
+  data = thermo_flanks, label = "model_thermo_int (treatment × clock)"
+)
+
+thermo_int_jt <- as.data.frame(joint_tests(model_thermo_int))
+
+thermo_int_jt %>%
+  transmute(Term = `model term`, df1, df2 = round(df2, 1),
+            F = round(F.ratio, 3), `p-value` = signif(p.value, 3)) %>%
+  kbl(caption = "Table 19b. Joint tests — body temperature ~ treatment × capture time.") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+
+thermo_int_p <- thermo_int_jt$p.value[thermo_int_jt$`model term` == "treatment:clock"]
+
+as.data.frame(emmeans(model_thermo_int, ~ treatment | clock)) %>%
+  transmute(`Capture time` = clock, Treatment = treatment,
+            `EMM ± SE` = paste0(round(emmean, 2), " ± ", round(SE, 2))) %>%
+  pivot_wider(names_from = `Capture time`, values_from = `EMM ± SE`) %>%
+  kbl(caption = "Table 19c. EMM ± SE (°C) by treatment within each capture time (treatment × clock model).") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+```
+
+## 5.3 · Shade × Water Factorial Model
+
+The same data analysed as a 2 × 2 factorial, with capture time as a covariate:
+
+`body_temp ~ shade * water + clock + period + (1 | group) + (1 | group:period) + (1 | animal_id) + (1 | day)`
+
+```{r}
+#| code-summary: "LMM — shade × water factorial model (joint tests)"
+
+model_thermo_fact <- fit_mm(
+  body_temp ~ shade * water + clock + period + (1 | group) + (1 | group:period) + (1 | animal_id) + (1 | day),
+  data = thermo_flanks, label = "model_thermo_fact (shade × water)"
+)
+
+thermo_fact_jt <- as.data.frame(joint_tests(model_thermo_fact))
+
+thermo_fact_jt %>%
+  transmute(Term = `model term`, df1, df2 = round(df2, 1),
+            F = round(F.ratio, 3), `p-value` = signif(p.value, 3)) %>%
+  kbl(caption = "Table 19d. Joint tests — body temperature ~ shade × water + capture time.") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+
+thermo_fact_p <- setNames(thermo_fact_jt$p.value, thermo_fact_jt$`model term`)
+
+if (thermo_fact_p["shade:water"] < 0.10) {
+  bind_rows(
+    as.data.frame(pairs(emmeans(model_thermo_fact, ~ shade | water))) %>%
+      mutate(Effect = paste0(contrast, " | water = ", water)),
+    as.data.frame(pairs(emmeans(model_thermo_fact, ~ water | shade))) %>%
+      mutate(Effect = paste0(contrast, " | shade = ", shade))
+  ) %>%
+    transmute(Effect, Estimate = round(estimate, 3), SE = round(SE, 3),
+              df = round(df, 1), t = round(t.ratio, 3), `p-value` = signif(p.value, 3)) %>%
+    kbl(caption = "Table 19e. Simple effects — shade within water and water within shade (interaction p < 0.10).") %>%
+    kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+    row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+} else {
+  cat("Shade × water interaction p =", signif(thermo_fact_p["shade:water"], 3),
+      "(≥ 0.10); simple effects not shown.")
+}
+```
+
+## 5.4 · Body Temperature by Anatomical Region
+
+```{r}
+#| code-summary: "Body temperature by anatomical region — descriptive table"
+
+thermo %>%
+  group_by(body_part) %>%
+  summarise(
+    Mean = round(mean(body_temp, na.rm = TRUE), 3),
+    SD   = round(sd(body_temp,   na.rm = TRUE), 3),
+    .groups = "drop"
+  ) %>%
+  rename(`Body part` = body_part) %>%
+  kbl(caption = "Table 20. Raw body surface temperature (°C) by anatomical region (mean ± SD).") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+```
+
+```{r}
+#| code-summary: "LMM — body temperature by anatomical region with pairwise contrasts"
+
+model_thermo_region <- fit_mm(
+  body_temp ~ body_part + period + (1 | group) + (1 | group:period) + (1 | animal_id) + (1 | day),
+  data = thermo, label = "model_thermo_region"
+)
+
+region_emm <- emm_table(model_thermo_region, "body_part")
+
+region_emm$means %>%
+  rename(`Body part` = Level, EMM = Mean) %>%
+  kbl(caption = "Table 21. Estimated marginal means (EMM ± SE) — body temperature by anatomical region.",
+      digits = 3) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+
+region_emm$contrasts %>%
+  kbl(caption = "Table 22. Pairwise contrasts — body temperature by anatomical region.",
+      digits = 4) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+```
+
+```{r}
+#| code-summary: "Body temperature by region — box plot"
+#| fig-cap: "Figure 8. Body surface temperature (°C) by anatomical region across all treatments."
+
+pal_region <- c(
+  "right_side" = "#2C4A2E",
+  "left_side"  = "#4A7FA5",
+  "eye"        = "#C8A84B",
+  "udder"      = "#6B4C35"
+)
+
+p_thermo_region <- ggplot(thermo,
+                          aes(x = reorder(body_part, body_temp, median),
+                              y = body_temp, fill = body_part)) +
+  geom_boxplot(alpha = 0.7, outlier.shape = 21) +
+  scale_fill_manual(values = pal_region) +
+  labs(x = "Anatomical region", y = "Body surface temperature (°C)", fill = NULL) +
+  theme_ws() +
+  theme(legend.position = "none")
+
+ggplotly(p_thermo_region, tooltip = c("x", "y"))
+```
+
+```{r}
+#| include: false
+
+region_order <- region_emm$means %>% arrange(desc(Mean)) %>% pull(Level) %>% as.character()
+region_names <- c(right_side = "right flank", left_side = "left flank", eye = "eye", udder = "udder")
+```
+
+Ranked by EMM, body surface temperature was highest at the `r region_names[region_order[1]]`, followed by the `r region_names[region_order[2]]`, `r region_names[region_order[3]]` and `r region_names[region_order[4]]`. Pairwise comparisons with significance levels are shown in Table 22 above.
+
+## 5.5 · Coat Color and Breed
+
+Coat color and breed are animal-level traits and are strongly confounded in this herd, so both models adjust for treatment and capture time. Because they vary only between animals, the animal (not the image) is the unit for these tests: the mixed models keep `(1 | animal_id)` even when its variance is ≈ 0 (dropping `group` instead if singular), and each trait is also tested on one mean per animal (n = 16; every animal was imaged equally often in every treatment, so the means are balanced).
+
+```{r}
+#| code-summary: "Coat color × breed cross-tab (animals)"
+
+coat_breed_xtab <- thermo_flanks %>%
+  distinct(animal_id, breed, coat_color) %>%
+  count(breed, coat_color) %>%
+  pivot_wider(names_from = coat_color, values_from = n, values_fill = 0)
+
+coat_breed_xtab %>%
+  rename(Breed = breed) %>%
+  kbl(caption = "Table 23. Number of thermographed animals by breed × coat color.") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+
+coat_counts <- thermo_flanks %>%
+  distinct(treatment, animal_id, period, coat_color) %>%
+  count(treatment, coat_color) %>%
+  pivot_wider(names_from = coat_color, values_from = n, values_fill = 0)
+
+coat_counts %>%
+  rename(Treatment = treatment) %>%
+  kbl(caption = "Table 23a. Number of animal × period combinations per coat color by treatment.") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+```
+
+::: {.panel-tabset}
+
+### Coat color
+
+```{r}
+#| code-summary: "LMM — body temperature by coat color (adjusted for treatment and capture time)"
+
+model_coat <- fit_mm(
+  body_temp ~ coat_color + treatment + clock + period + (1 | group) + (1 | group:period) + (1 | animal_id) + (1 | day),
+  data = thermo_flanks, label = "model_coat", keep = c("group:period", "animal_id")
+)
+
+coat_aov <- anova(model_coat)
+coat_p   <- coat_aov["coat_color", "Pr(>F)"]
+coat_emm <- emm_table(model_coat, "coat_color")
+
+coat_emm$means %>%
+  rename(`Coat color` = Level, EMM = Mean) %>%
+  kbl(caption = "Table 25. Estimated marginal means (EMM ± SE) — body temperature by coat color (adjusted for treatment, capture time and period).",
+      digits = 3) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+
+coat_emm$contrasts %>%
+  kbl(caption = "Table 26. Pairwise contrasts — body temperature by coat color.",
+      digits = 4) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+```
+
+```{r}
+#| code-summary: "Flank temperature by coat color — box plot"
+#| fig-cap: "Figure 9. Flank body surface temperature (°C) by coat color (raw data)."
+
+p_coat <- ggplot(thermo_flanks,
+                 aes(x = coat_color, y = body_temp, fill = coat_color)) +
+  geom_boxplot(alpha = 0.7, outlier.shape = 21) +
+  scale_fill_manual(values = c(
+    "Black"  = "#2A2A2A",
+    "Red"    = "#8B3A3A",
+    "Cream"  = "#C8A84B"
+  )) +
+  labs(x = "Coat color", y = "Body surface temperature (°C)", fill = NULL) +
+  theme_ws() +
+  theme(legend.position = "none")
+
+ggplotly(p_coat, tooltip = c("x", "y"))
+```
+
+### Breed
+
+```{r}
+#| code-summary: "LMM — body temperature by breed (adjusted for treatment and capture time)"
+
+model_breed <- fit_mm(
+  body_temp ~ breed + treatment + clock + period + (1 | group) + (1 | group:period) + (1 | animal_id) + (1 | day),
+  data = thermo_flanks, label = "model_breed", keep = c("group:period", "animal_id")
+)
+
+breed_aov <- anova(model_breed)
+breed_emm <- emm_table(model_breed, "breed")
+
+breed_emm$means %>%
+  rename(Breed = Level, EMM = Mean) %>%
+  kbl(caption = "Table 29. Estimated marginal means (EMM ± SE) — body temperature by breed (adjusted for treatment, capture time and period).",
+      digits = 3) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+
+breed_emm$contrasts %>%
+  kbl(caption = "Table 30. Contrast — body temperature Braford vs Jersey.",
+      digits = 4) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+```
+
+```{r}
+#| code-summary: "Flank temperature by breed — box plot"
+#| fig-cap: "Figure 10. Flank body surface temperature (°C) by breed (raw data)."
+
+p_breed <- ggplot(thermo_flanks,
+                  aes(x = breed, y = body_temp, fill = breed)) +
+  geom_boxplot(alpha = 0.7, outlier.shape = 21) +
+  scale_fill_manual(values = c(
+    "Braford" = "#C8A84B",
+    "Jersey"  = "#4A7FA5"
+  )) +
+  labs(x = "Breed", y = "Body surface temperature (°C)", fill = NULL) +
+  theme_ws() +
+  theme(legend.position = "none")
+
+ggplotly(p_breed, tooltip = c("x", "y"))
+```
+
+### One mean per animal (n = 16)
+
+```{r}
+#| code-summary: "Coat color and breed on animal means (lm, n = 16)"
+
+animal_means <- thermo_flanks %>%
+  group_by(animal_id, breed, coat_color) %>%
+  summarise(n_obs = n(), body_temp = mean(body_temp), .groups = "drop")
+
+lm_coat_animal  <- lm(body_temp ~ coat_color, data = animal_means)
+lm_breed_animal <- lm(body_temp ~ breed,      data = animal_means)
+
+coat_animal_aov  <- anova(lm_coat_animal)
+breed_animal_aov <- anova(lm_breed_animal)
+coat_animal_emm  <- emm_table(lm_coat_animal,  "coat_color")
+breed_animal_emm <- emm_table(lm_breed_animal, "breed")
+
+# F test summary: mixed model (Satterthwaite) vs animal means
+aov_row <- function(a, term, label, method) {
+  is_lmer <- "DenDF" %in% names(a)
+  tibble(
+    Trait  = label, Analysis = method,
+    `F`    = a[term, "F value"],
+    df1    = a[term, if (is_lmer) "NumDF" else "Df"],
+    df2    = if (is_lmer) a[term, "DenDF"] else a["Residuals", "Df"],
+    `p-value` = a[term, "Pr(>F)"]
+  )
+}
+
+trait_tests <- bind_rows(
+  aov_row(coat_aov,         "coat_color", "Coat color", "Mixed model (images; animal_id kept)"),
+  aov_row(coat_animal_aov,  "coat_color", "Coat color", "lm on animal means (n = 16)"),
+  aov_row(breed_aov,        "breed",      "Breed",      "Mixed model (images; animal_id kept)"),
+  aov_row(breed_animal_aov, "breed",      "Breed",      "lm on animal means (n = 16)")
+)
+
+trait_tests %>%
+  mutate(across(c(`F`, df2), ~ round(., 2)), `p-value` = round(`p-value`, 4)) %>%
+  kbl(caption = "Table 30a. Coat color and breed — F tests from the mixed models and from one mean per animal.") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+
+coat_animal_emm$means %>%
+  rename(`Coat color` = Level) %>%
+  kbl(caption = "Table 30b. Body temperature by coat color — means ± SE of animal means (n = 16).", digits = 3) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+
+coat_animal_emm$contrasts %>%
+  kbl(caption = "Table 30c. Pairwise contrasts — coat color on animal means (Tukey).", digits = 4) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+```
+
+:::
+
+## 5.6 · Model Fitting Notes and Residual Diagnostics
+
+```{r}
+#| code-summary: "Convergence / singularity log for the thermography models"
+
+model_log %>%
+  rename(Model = model, Status = status, Action = action, `Final random-effect variances` = final) %>%
+  kbl(caption = "Table 31. Convergence and singularity checks for the thermography models.") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+```
+
+::: {.callout-note collapse="true" title="Residual diagnostics (click to expand)"}
+
+```{r}
+#| code-summary: "Thermography LMMs — residuals vs fitted and QQ plots"
+#| fig-cap: "Figure 11. Residuals vs fitted values (top) and normal QQ plots (bottom) for the thermography LMMs."
+#| fig-width: 11
+#| fig-height: 7
+
+thermo_diag <- imap_dfr(
+  list("Treatment + clock" = model_thermo, "Treatment × clock" = model_thermo_int,
+       "Shade × water"     = model_thermo_fact, "Region" = model_thermo_region),
+  ~ tibble(model = .y, fitted = fitted(.x), resid = resid(.x))
+)
+
+p_rf <- ggplot(thermo_diag, aes(fitted, resid)) +
+  geom_hline(yintercept = 0, color = "#6B6B6B", linetype = "dashed") +
+  geom_point(alpha = 0.3, size = 0.8, color = "#2C4A2E") +
+  geom_smooth(method = "loess", formula = y ~ x, se = FALSE, color = "#C8A84B") +
+  facet_wrap(~ model, scales = "free", nrow = 1) +
+  labs(x = "Fitted", y = "Residual") +
+  theme_ws()
+
+p_qq <- ggplot(thermo_diag, aes(sample = resid)) +
+  stat_qq(alpha = 0.3, size = 0.8, color = "#2C4A2E") +
+  stat_qq_line(color = "#C8A84B") +
+  facet_wrap(~ model, scales = "free", nrow = 1) +
+  labs(x = "Theoretical quantiles", y = "Sample quantiles") +
+  theme_ws()
+
+p_rf / p_qq
+```
+
+:::
+
+# Results
+
+```{r}
+#| include: false
+#| code-summary: "Prepare values for the thermal Results section"
+
+get_emm <- function(emm, level) round(emm$means$Mean[emm$means$Level == level], 3)
+
+get_p <- function(emm, idx = 1) {
+  p <- emm$contrasts$`p-value`[idx]
+  ifelse(p < 0.001, "< 0.001", formatC(p, format = "f", digits = 3))
+}
+
+get_cld <- function(model, factor) {
+  emm <- emmeans(model, as.formula(paste("~", factor)))
+  cld_df <- multcomp::cld(emm, Letters = letters, adjust = "tukey", reversed = TRUE)
+  cld_df <- as.data.frame(cld_df)
+  nms <- names(cld_df)
+  data.frame(
+    Level   = cld_df[[nms[1]]],              
+    Letters = trimws(cld_df[[nms[length(nms)]]])
+  )
+}
+# ── Meteorological ────────────────────────────────────────────────────────────
+mean_temp  <- round(mean(climate$air_temp_mean, na.rm = TRUE), 1)
+max_temp   <- round(max(climate$air_temp_max,   na.rm = TRUE), 1)
+min_temp   <- round(min(climate$air_temp_min,   na.rm = TRUE), 1)
+mean_rh    <- round(mean(climate$rh_mean,       na.rm = TRUE), 1)
+total_prec <- round(sum(climate$precipitation_mm, na.rm = TRUE), 1)
+
+# ── Black globe temperature ───────────────────────────────────────────────────
+g_sun      <- round(get_emm(globe_emm, "Sun"),   2)
+g_shade    <- round(get_emm(globe_emm, "Shade"), 2)
+g_diff     <- round(g_sun - g_shade, 2)
+g_p        <- globe_emm$contrasts$`p-value`[1]
+g_p_text   <- ifelse(g_p < 0.001, "< 0.001", formatC(g_p, format = "f", digits = 3))
+
+globe_sun_max <- round(max(climate$globe_temp_sun, na.rm = TRUE), 1)
+globe_shade_at_peak <- round(globe_shade_at_peak, 1)
+
+# ── BGHI ──────────────────────────────────────────────────────────────────────
+bghi_sun_emm   <- round(get_emm(bghi_emm, "Sun"),   2)
+bghi_shade_emm <- round(get_emm(bghi_emm, "Shade"), 2)
+bghi_p         <- bghi_emm$contrasts$`p-value`[1]
+bghi_p_text    <- ifelse(bghi_p < 0.001, "< 0.001", formatC(bghi_p, format = "f", digits = 3))
+
+bghi_crit_hrs    <- bghi_tbl$`Hours >84 (critical)`[bghi_tbl$Location == "Sun"]
+bghi_alert_hrs   <- bghi_tbl$`Hours >78 (danger+)`[bghi_tbl$Location  == "Sun"]
+bghi_alert_total <- sum(!is.na(climate$bghi_sun))      # hourly observations
+
+bghi_crit_hrs_sh <- bghi_tbl$`Hours >84 (critical)`[bghi_tbl$Location == "Shade"]
+bghi_alert_hrs_sh<- bghi_tbl$`Hours >78 (danger+)`[bghi_tbl$Location  == "Shade"]
+bghi_alert_total_sh <- sum(!is.na(climate$bghi_shade))
+
+# ── RTL ───────────────────────────────────────────────────────────────────────
+rtl_sun_emm    <- round(get_emm(rtl_emm, "Sun"),   1)
+rtl_shade_emm  <- round(get_emm(rtl_emm, "Shade"), 1)
+rtl_pct_red    <- round((1 - rtl_shade_emm / rtl_sun_emm) * 100, 1)
+rtl_p          <- rtl_emm$contrasts$`p-value`[1]
+rtl_p_text     <- ifelse(rtl_p < 0.001, "< 0.001", formatC(rtl_p, format = "f", digits = 3))
+rtl_sun_max    <- round(max(climate$rtl_sun, na.rm = TRUE), 1)
+
+# ── Soil surface temperature ──────────────────────────────────────────────────
+soil_shade_m <- round(get_emm(soil_emm, "shade"), 2)
+soil_sbt_m   <- round(get_emm(soil_emm, "sun_between_trees"), 2)
+soil_sun_m   <- round(get_emm(soil_emm, "full_sun"), 2)
+soil_diff_sbt <- round(soil_sbt_m - soil_shade_m, 2)
+soil_diff_sun <- round(soil_sun_m - soil_shade_m, 2)
+
+soil_p_shade_sun <- soil_emm$contrasts %>%
+  filter(str_detect(Comparison, "shade") & str_detect(Comparison, "full_sun")) %>%
+  pull(`p-value`)
+soil_p_shade_sun_text <- ifelse(soil_p_shade_sun < 0.001, "< 0.001",
+                                formatC(soil_p_shade_sun, format = "f", digits = 3))
+
+soil_p_shade_sbt <- soil_emm$contrasts %>%
+  filter(str_detect(Comparison, "shade") & str_detect(Comparison, "sun_between")) %>%
+  pull(`p-value`)
+soil_p_shade_sbt_text <- ifelse(soil_p_shade_sbt < 0.001, "< 0.001",
+                                formatC(soil_p_shade_sbt, format = "f", digits = 3))
+
+# ── Body surface temperature (one model: treatment + clock + period) ──────────
+# All body temperature results are EMM ± SE from model_thermo (flanks averaged)
+and_list <- function(x) {
+  if (length(x) <= 1) return(paste(x))
+  paste(paste(x[-length(x)], collapse = ", "), "and", x[length(x)])
+}
+
+emm_se <- function(emm, level) {
+  i <- emm$means$Level == level
+  paste0(formatC(emm$means$Mean[i], format = "f", digits = 2), " ± ",
+         formatC(emm$means$SE[i],   format = "f", digits = 2))
+}
+
+pair_p <- function(emm, a, b) {
+  cmp <- emm$contrasts$Comparison
+  emm$contrasts$`p-value`[cmp %in% c(paste(a, "-", b), paste(b, "-", a),
+                                     paste0("(", a, ") - (", b, ")"), paste0("(", b, ") - (", a, ")"))]
+}
+
+bt_spwp <- emm_se(trat_emm, "S+W+")
+bt_spwm <- emm_se(trat_emm, "S+W-")
+bt_smwp <- emm_se(trat_emm, "S-W+")
+bt_smwm <- emm_se(trat_emm, "S-W-")
+
+trt_order <- trat_emm$means %>% arrange(Mean) %>% pull(Level) %>% as.character() %>%
+  str_replace_all("-", "−")
+
+thermo_trt_p_text   <- fmt_p(thermo_anova["treatment", "Pr(>F)"])
+thermo_clock_p_text <- fmt_p(thermo_anova["clock", "Pr(>F)"])
+
+# Shade contrasts (same water level) and water contrasts (same shade level)
+p_shade_wp   <- pair_p(trat_emm, "S+W+", "S-W+")
+p_shade_wm   <- pair_p(trat_emm, "S+W-", "S-W-")
+p_water_sp   <- pair_p(trat_emm, "S+W+", "S+W-")
+p_water_sm   <- pair_p(trat_emm, "S-W+", "S-W-")
+p_cross_1    <- pair_p(trat_emm, "S+W+", "S-W-")
+p_cross_2    <- pair_p(trat_emm, "S+W-", "S-W+")
+
+cld_thermo_trat <- get_cld(model_thermo, "treatment")
+
+# Interaction and factorial models
+thermo_int_p_text     <- fmt_p(thermo_int_p)
+thermo_fact_shade_p   <- fmt_p(thermo_fact_p["shade"])
+thermo_fact_water_p   <- fmt_p(thermo_fact_p["water"])
+thermo_fact_int_p     <- fmt_p(thermo_fact_p["shade:water"])
+
+# ── Body surface temperature across capture times (same model) ───────────────
+bt_10 <- emm_se(hour_emm, "10:00")
+bt_13 <- emm_se(hour_emm, "13:00")
+bt_16 <- emm_se(hour_emm, "16:00")
+clock_order <- hour_emm$means %>% arrange(desc(Mean)) %>% pull(Level) %>% as.character()
+
+p_10_13_text <- fmt_p(pair_p(hour_emm, "10:00", "13:00"))
+p_13_16_text <- fmt_p(pair_p(hour_emm, "13:00", "16:00"))
+p_10_16_text <- fmt_p(pair_p(hour_emm, "10:00", "16:00"))
+
+# ── Body surface temperature by anatomical region ─────────────────────────────
+cld_thermo_region <- get_cld(model_thermo_region, "body_part")
+
+# ── Coat color (adjusted for treatment, capture time, period) ─────────────────
+bt_black <- emm_se(coat_emm, "Black")
+bt_red   <- emm_se(coat_emm, "Red")
+bt_cream <- emm_se(coat_emm, "Cream")
+coat_p_text <- fmt_p(coat_p)
+
+p_black_red_text   <- fmt_p(pair_p(coat_emm, "Black", "Red"))
+p_black_cream_text <- fmt_p(pair_p(coat_emm, "Black", "Cream"))
+p_red_cream_text   <- fmt_p(pair_p(coat_emm, "Red",   "Cream"))
+
+n_braford_red <- coat_breed_xtab %>% filter(breed == "Braford") %>% pull(Red)
+
+# F(df1, df2) strings for the coat color and breed tests (Table 30a)
+f_text <- function(trait, analysis) {
+  r <- trait_tests %>% filter(Trait == trait, str_starts(Analysis, analysis))
+  paste0("F(", r$df1, ", ", formatC(r$df2, format = "f", digits = if (r$df2 %% 1 == 0) 0 else 1),
+         ") = ", formatC(r$`F`, format = "f", digits = 2), ", p ", fmt_p(r$`p-value`))
+}
+coat_mm_f     <- f_text("Coat color", "Mixed")
+coat_animal_f <- f_text("Coat color", "lm")
+breed_mm_f     <- f_text("Breed", "Mixed")
+breed_animal_f <- f_text("Breed", "lm")
+coat_animal_p_bc <- fmt_p(pair_p(coat_animal_emm, "Black", "Cream"))
+coat_animal_p_br <- fmt_p(pair_p(coat_animal_emm, "Black", "Red"))
+coat_animal_p_rc <- fmt_p(pair_p(coat_animal_emm, "Red",   "Cream"))
+coat_animal_sig  <- coat_animal_aov["coat_color", "Pr(>F)"] < 0.05
+coat_animal_var_zero <- str_detect(model_log$action[model_log$model == "model_coat"], "animal_id variance ≈ 0")
+
+# ── Breed (adjusted for treatment, capture time, period) ──────────────────────
+bt_braford <- emm_se(breed_emm, "Braford")
+bt_jersey  <- emm_se(breed_emm, "Jersey")
+bt_breed_p_text <- fmt_p(breed_emm$contrasts$`p-value`[1])
+
+# ── Meteorological extremes by period (for the text) ──────────────────────────
+warmest  <- meteo_summary %>% arrange(desc(`Mean Temp (°C)`)) %>% slice(1:2)
+humidest <- meteo_summary %>% slice_max(`Mean RH (%)`, n = 1)
+```
+
+## Meteorological Context
+
+Mean air temperature across experimental periods was `r mean_temp` °C (range: `r min_temp`–`r max_temp` °C), with mean relative humidity of `r mean_rh`% and total precipitation of `r total_prec` mm (Table 1). Periods `r warmest$Period[1]` and `r warmest$Period[2]` were the warmest (`r warmest$"Mean Temp (°C)"[1]` °C and `r warmest$"Mean Temp (°C)"[2]` °C, respectively), while Period `r humidest$Period[1]` was the most humid (`r humidest$"Mean RH (%)"[1]`% RH).
+
+```{r}
+#| code-summary: "Table 1 — meteorological summary by period"
+#| tbl-cap: "Table 1. Meteorological summary by experimental period."
+
+meteo_summary <- climate %>%
+  group_by(period) %>%
+  summarise(
+    `Mean Temp (°C)`    = round(mean(air_temp_mean,    na.rm = TRUE), 1),
+    `Max Temp (°C)`     = round(max(air_temp_max,      na.rm = TRUE), 1),
+    `Mean RH (%)`       = round(mean(rh_mean,          na.rm = TRUE), 1),
+    `Total Precip (mm)` = round(sum(precipitation_mm,  na.rm = TRUE), 1),
+    `Mean Wind (m/s)`   = round(mean(wind_speed,       na.rm = TRUE), 2),
+    .groups = "drop"
+  ) %>%
+  rename(Period = period)
+
+meteo_summary %>%
+  kbl(caption = "Table 1. Meteorological summary by experimental period.") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+```
+
+## Thermal Environment
+
+Shade reduced all measured thermal indices (p < 0.001; Table 2). Mean black globe temperature in the sun was `r g_sun` °C compared to `r g_shade` °C in shade — a mean difference of `r g_diff` °C (p `r g_p_text`). Peak unshaded black globe temperature reached `r globe_sun_max` °C, compared to `r globe_shade_at_peak` °C in shade at the same hour.
+
+**Table 2.** Thermal environment characterization by condition. BGT = black globe temperature; BGHI = black globe-humidity index; RTL = radiant thermal load; SST = soil surface temperature. EMM = estimated marginal mean from linear mixed model; SE = standard error. *** p < 0.001.
+
+```{r}
+#| code-summary: "Table 2 — thermal indices by condition"
+
+table2_thermal <- tibble(
+  Variable  = c("BGT (°C)", "BGT (°C)", "BGHI", "BGHI",
+                "RTL (W/m²)", "RTL (W/m²)",
+                "SST (°C)", "SST (°C)", "SST (°C)"),
+  Condition = c("Sun", "Shade", "Sun", "Shade",
+                "Sun", "Shade",
+                "Full sun", "Sun between trees", "Shade"),
+  `Mean ± SD` = c(
+    paste0(round(globe_summary_tbl$Mean[1], 2), " ± ", round(globe_summary_tbl$SD[1], 2)),
+    paste0(round(globe_summary_tbl$Mean[2], 2), " ± ", round(globe_summary_tbl$SD[2], 2)),
+    paste0(round(bghi_tbl$Mean[1], 2), " ± ", round(bghi_tbl$SD[1], 2)),
+    paste0(round(bghi_tbl$Mean[2], 2), " ± ", round(bghi_tbl$SD[2], 2)),
+    paste0(round(RTL_tbl$Mean[1], 1), " ± ", round(RTL_tbl$SD[1], 1)),
+    paste0(round(RTL_tbl$Mean[2], 1), " ± ", round(RTL_tbl$SD[2], 1)),
+    paste0(round(soil_tbl$Mean[3], 2), " ± ", round(soil_tbl$SD[3], 2)),
+    paste0(round(soil_tbl$Mean[2], 2), " ± ", round(soil_tbl$SD[2], 2)),
+    paste0(round(soil_tbl$Mean[1], 2), " ± ", round(soil_tbl$SD[1], 2))
+  ),
+  `EMM ± SE` = c(
+    paste0(round(globe_emm$means$Mean[1], 2), " ± ", round(globe_emm$means$SE[1], 2)),
+    paste0(round(globe_emm$means$Mean[2], 2), " ± ", round(globe_emm$means$SE[2], 2)),
+    paste0(round(bghi_emm$means$Mean[1], 2), " ± ", round(bghi_emm$means$SE[1], 2)),
+    paste0(round(bghi_emm$means$Mean[2], 2), " ± ", round(bghi_emm$means$SE[2], 2)),
+    paste0(round(rtl_emm$means$Mean[1], 1), " ± ", round(rtl_emm$means$SE[1], 1)),
+    paste0(round(rtl_emm$means$Mean[2], 1), " ± ", round(rtl_emm$means$SE[2], 1)),
+    paste0(round(soil_emm$means$Mean[3], 2), " ± ", round(soil_emm$means$SE[3], 2)),
+    paste0(round(soil_emm$means$Mean[2], 2), " ± ", round(soil_emm$means$SE[2], 2)),
+    paste0(round(soil_emm$means$Mean[1], 2), " ± ", round(soil_emm$means$SE[1], 2))
+  ),
+  `p-value` = c("***", "", "***", "", "***", "", "***", "", "")
+)
+
+table2_thermal %>%
+  kbl(caption = "Table 2. Thermal environment by condition (mean ± SD and EMM ± SE).") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE) %>%
+  pack_rows("BGT (°C)", 1, 2, background = "#F5F0E8", bold = TRUE) %>%
+  pack_rows("BGHI", 3, 4, background = "#F5F0E8", bold = TRUE) %>%
+  pack_rows("RTL (W/m²)", 5, 6, background = "#F5F0E8", bold = TRUE) %>%
+  pack_rows("SST (°C)", 7, 9, background = "#F5F0E8", bold = TRUE)
+```
+
+```{r}
+#| code-summary: "Figure 1 — black globe temperature (static)"
+#| fig-cap: "Figure 1. Mean hourly black globe temperature (°C) in sun and shade conditions. Ribbons represent maximum and minimum values for the relative time of day."
+#| fig-width: 7
+#| fig-height: 4
+#| fig-align: center
+
+globe_ts <- climate %>%
+  select(hour, clock, globe_temp_sun, globe_temp_shade) %>%
+  pivot_longer(c(globe_temp_sun, globe_temp_shade),
+               names_to = "location", values_to = "globe_temp") %>%
+  mutate(location = recode(location,
+    "globe_temp_sun"   = "Sun",
+    "globe_temp_shade" = "Shade")) %>%
+  group_by(hour, clock, location) %>%
+  summarise(mean = mean(globe_temp, na.rm = TRUE),
+            max   = max(globe_temp,   na.rm = TRUE),
+            min   = min(globe_temp,   na.rm = TRUE),
+            .groups = "drop")
+
+ggplot(globe_ts, aes(x = hour, y = mean, color = location, fill = location)) +
+  geom_ribbon(aes(ymin = min, ymax = max), alpha = 0.15, color = NA) +
+  geom_line(linewidth = 1.2) +
+  geom_point(size = 2.5) +
+  scale_x_continuous(breaks = 0:23, labels = obs_to_clock(0:23)) +
+  scale_color_manual(values = pal_sun_shade) +
+  scale_fill_manual( values = pal_sun_shade) +
+  labs(x = "Time of day", y = "Black globe temperature (°C)", color = NULL, fill = NULL) +
+  theme_ws() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+### Black Globe-Humidity Index (BGHI)
+
+In unshaded paddocks, mean BGHI was `r bghi_sun_emm` compared to `r bghi_shade_emm` in shade (p `r bghi_p_text`). Unshaded conditions exceeded the critical threshold (BGHI > 84) in `r bghi_crit_hrs` out of `r bghi_alert_total` hourly observations and reached danger or critical levels (BGHI > 78) in `r bghi_alert_hrs` out of `r bghi_alert_total` observations. Shaded paddocks exceeded the critical threshold in `r bghi_crit_hrs_sh` out of `r bghi_alert_total_sh` observations and reached danger or critical levels (BGHI > 78) in `r bghi_alert_hrs_sh` out of `r bghi_alert_total_sh` observations, indicating that shade reduced but did not eliminate heat stress.
+
+```{r}
+#| code-summary: "Figure 2 — BGHI time series with thresholds (static)"
+#| fig-cap: "Figure 2. Mean hourly BGHI in sun and shade conditions. Dashed horizontal lines mark the thermal stress bounds (74, 78, 84) following Baeta & Souza (2010): comfort (≤ 74), alert (> 74–78), danger (> 78–84), and critical (> 84). Ribbons represent maximum and minimum values for the relative time of day."
+#| fig-width: 7
+#| fig-height: 4.5
+#| fig-align: center
+
+bghi_ts <- climate %>%
+  select(hour, clock, bghi_sun, bghi_shade) %>%
+  pivot_longer(c(bghi_sun, bghi_shade),
+               names_to = "location", values_to = "bghi") %>%
+  mutate(location = recode(location,
+    "bghi_sun"   = "Sun",
+    "bghi_shade" = "Shade")) %>%
+  group_by(hour, clock, location) %>%
+  summarise(mean = mean(bghi, na.rm = TRUE),
+            max   = max(bghi,   na.rm = TRUE),
+            min   = min(bghi,   na.rm = TRUE),
+            .groups = "drop")
+
+ggplot(bghi_ts, aes(x = hour, y = mean, color = location, fill = location)) +
+  geom_ribbon(aes(ymin = min, ymax = max),
+              alpha = 0.15, color = NA, show.legend = FALSE) +
+  geom_hline(yintercept = bghi_bounds$yintercept,
+             linetype = "dashed",
+             color    = bghi_bounds$color,
+             linewidth = 0.7) +
+  annotate("text",
+           x     = 12.3,
+           y     = bghi_thresholds$y,
+           label = bghi_thresholds$label,
+           hjust = 0, vjust = 0.5,
+           size  = 3, color = bghi_thresholds$color) +
+  geom_line(linewidth = 1.2) +
+  geom_point(size = 2.5) +
+  scale_x_continuous(breaks = 0:23, labels = obs_to_clock(0:23)) +
+  scale_y_continuous(expand = expansion(mult = c(0.05, 0.12))) +
+  scale_color_manual(values = pal_sun_shade) +
+  scale_fill_manual( values = pal_sun_shade) +
+  labs(x = "Time of day", y = "BGHI", color = NULL, fill = NULL) +
+  coord_cartesian(clip = "off") +
+  theme_ws() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        plot.margin = margin(10, 80, 10, 10))
+```
+
+### Radiant Thermal Load (RTL)
+
+Mean RTL in sun was `r rtl_sun_emm` W/m² compared to `r rtl_shade_emm` W/m² in shade, representing a reduction of `r rtl_pct_red`% (p `r rtl_p_text`). Peak RTL in unshaded areas reached `r rtl_sun_max` W/m².
+
+```{r}
+#| code-summary: "Figure 3 — RTL time series (static)"
+#| fig-cap: "Figure 3. Mean hourly Radiant Thermal Load (W/m²) in sun and shade. Ribbons = ±1 SD."
+#| fig-width: 7
+#| fig-height: 4
+#| fig-align: center
+
+RTL_ts <- climate %>%
+  select(hour, clock, rtl_sun, rtl_shade) %>%
+  pivot_longer(c(rtl_sun, rtl_shade),
+               names_to = "location", values_to = "RTL") %>%
+  mutate(location = recode(location,
+    "rtl_sun"   = "Sun",
+    "rtl_shade" = "Shade")) %>%
+  group_by(hour, clock, location) %>%
+  summarise(mean = mean(RTL, na.rm = TRUE),
+            sd   = sd(RTL,   na.rm = TRUE),
+            .groups = "drop")
+
+ggplot(RTL_ts, aes(x = hour, y = mean, color = location, fill = location)) +
+  geom_ribbon(aes(ymin = mean - sd, ymax = mean + sd), alpha = 0.15, color = NA) +
+  geom_line(linewidth = 1.2) +
+  geom_point(size = 2.5) +
+  scale_x_continuous(breaks = 0:23, labels = obs_to_clock(0:23)) +
+  scale_color_manual(values = pal_sun_shade) +
+  scale_fill_manual( values = pal_sun_shade) +
+  labs(x = "Time of day", y = "RTL (W/m²)", color = NULL, fill = NULL) +
+  theme_ws() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+### Soil Surface Temperature
+
+Mean soil surface temperature was `r soil_shade_m` °C in shade, `r soil_sbt_m` °C in sun between trees, and `r soil_sun_m` °C in full sun. Sun between trees was `r soil_diff_sbt` °C warmer than shade (p `r soil_p_shade_sbt_text`) and full sun was `r soil_diff_sun` °C warmer than shade (p `r soil_p_shade_sun_text`).
+
+```{r}
+#| code-summary: "Figure 4 — soil temperature by location (static)"
+#| fig-cap: "Figure 4. Mean hourly soil surface temperature (°C) by measurement location. Ribbons = ±1 SD."
+#| fig-width: 7
+#| fig-height: 4
+#| fig-align: center
+
+soil_ts <- soil %>%
+  group_by(hour, soil_location) %>%
+  summarise(mean = mean(soil_temp_mean, na.rm = TRUE),
+            sd   = sd(soil_temp_mean,   na.rm = TRUE),
+            .groups = "drop")
+
+ggplot(soil_ts, aes(x = hour, y = mean, color = soil_location, fill = soil_location)) +
+  geom_ribbon(aes(ymin = mean - sd, ymax = mean + sd), alpha = 0.2, color = NA) +
+  geom_line(linewidth = 1.2) +
+  geom_point(size = 2.5) +
+  scale_x_continuous(breaks = 0:23, labels = obs_to_clock(0:23)) +
+  scale_color_manual(values = pal_location,
+                     labels = c("Shade", "Sun between trees", "Full sun")) +
+  scale_fill_manual( values = pal_location,
+                     labels = c("Shade", "Sun between trees", "Full sun")) +
+  labs(x = "Time of day", y = "Soil surface temperature (°C)", color = NULL, fill = NULL) +
+  theme_ws() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+## Body Surface Temperature
+
+### By Treatment
+
+Flank body surface temperature (right and left flank averaged; one model with treatment and capture time) was affected by treatment (p `r thermo_trt_p_text`). EMMs ± SE were `r bt_spwp` °C in S+W+, `r bt_spwm` °C in S+W−, `r bt_smwp` °C in S−W+ and `r bt_smwm` °C in S−W− (lowest to highest: `r and_list(trt_order)`; Table 3). Each shaded treatment was cooler than each unshaded treatment (S+W+ vs S−W+: p `r fmt_p(p_shade_wp)`; S+W− vs S−W−: p `r fmt_p(p_shade_wm)`; S+W+ vs S−W−: p `r fmt_p(p_cross_1)`; S+W− vs S−W+: p `r fmt_p(p_cross_2)`), while water access made no difference within shade (S+W+ vs S+W−: p `r fmt_p(p_water_sp)`) or without shade (S−W+ vs S−W−: p `r fmt_p(p_water_sm)`). The factorial model confirms this: shade p `r thermo_fact_shade_p`, water p `r thermo_fact_water_p`, shade × water p `r thermo_fact_int_p`.
+
+**Table 3.** Flank body surface temperature (°C) by treatment (EMM ± SE). Different letters indicate significant differences (Tukey-adjusted, p < 0.05).
+
+```{r}
+#| code-summary: "Table 3 — body surface temperature by treatment"
+
+table3_thermo <- tibble(
+  Treatment   = c("S+W+", "S+W−", "S−W+", "S−W−"),
+  `EMM ± SE`  = c(bt_spwp, bt_spwm, bt_smwp, bt_smwm),
+  Letters = cld_thermo_trat$Letters[match(c("S+W+","S+W-","S-W+","S-W-"),
+                                          cld_thermo_trat$Level)]
+)
+
+table3_thermo %>%
+  kbl(caption = "Table 3. Flank body surface temperature (°C) by treatment (EMM ± SE).") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE) %>%
+  footnote(general = "EMM ± SE from body_temp ~ treatment + clock + period + (1 | group) + (1 | group:period) + (1 | animal_id) + (1 | day), flanks averaged; averaged over capture times. Different letters indicate significant differences (Tukey-adjusted, p < 0.05).")
+```
+
+```{r}
+#| code-summary: "Figure 6 — body surface temperature by treatment (static)"
+#| fig-cap: "Figure 6. Body surface temperature (°C) at the flanks by treatment."
+#| fig-width: 6
+#| fig-height: 4
+#| fig-align: center
+
+ggplot(thermo_flanks, aes(x = treatment, y = body_temp, fill = treatment)) +
+  geom_boxplot(alpha = 0.7, outlier.shape = 21, outlier.size = 1.5) +
+  geom_jitter(width = 0.15, alpha = 0.25, size = 1) +
+  scale_fill_manual(values = pal_treatment) +
+  labs(x = "Treatment", y = "Body surface temperature (°C)", fill = NULL) +
+  theme_ws() +
+  theme(legend.position = "none")
+```
+
+### Across Time of Day
+
+In the same model, capture time affected body surface temperature (p `r thermo_clock_p_text`). EMMs ± SE were `r bt_10` °C at 10:00h, `r bt_13` °C at 13:00h and `r bt_16` °C at 16:00h (10:00 vs 13:00: p `r p_10_13_text`; 13:00 vs 16:00: p `r p_13_16_text`; 10:00 vs 16:00: p `r p_10_16_text`; Table 4, Figure 7). The treatment × capture time interaction (additional model, Section 5.2) was p `r thermo_int_p_text`, so the size of the treatment differences changed across the day.
+
+**Table 4.** Body surface temperature (°C) by observation time (EMM ± SE). Different letters indicate significant differences (Tukey-adjusted, p < 0.05).
+
+```{r}
+#| code-summary: "Table 4 — body surface temperature across time of day"
+
+cld_hour <- get_cld(model_thermo, "clock")
+
+table4_thermo <- tibble(
+  Time       = c("10:00", "13:00", "16:00"),
+  `EMM ± SE` = c(bt_10, bt_13, bt_16),
+  Letters = cld_hour$Letters[match(c("10:00","13:00","16:00"), cld_hour$Level)]
+)
+
+table4_thermo %>%
+  kbl(caption = "Table 4. Body surface temperature (°C) by capture time (EMM ± SE).") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE) %>%
+  footnote(general = "EMM ± SE from the same model as Table 3 (treatment + clock + period), averaged over treatments. Different letters indicate significant differences (Tukey-adjusted, p < 0.05).")
+```
+
+```{r}
+#| code-summary: "Figure 7 — body surface temperature across time (static)"
+#| fig-cap: "Figure 7. Mean body surface temperature (°C) at 10:00, 13:00, and 16:00h by treatment. Error bars = SD."
+#| fig-width: 6
+#| fig-height: 4
+#| fig-align: center
+
+thermo_hour_sum <- thermo_flanks %>%
+  group_by(treatment, hour, clock) %>%
+  summarise(mean = mean(body_temp, na.rm = TRUE),
+            sd   = sd(body_temp,   na.rm = TRUE),
+            .groups = "drop")
+
+ggplot(thermo_hour_sum, aes(x = clock, y = mean, color = treatment, group = treatment)) +
+  geom_errorbar(aes(ymin = mean - sd, ymax = mean + sd), width = 0.15, alpha = 0.6) +
+  geom_line(linewidth = 1.1) +
+  geom_point(size = 3) +
+  scale_color_manual(values = pal_treatment) +
+  labs(x = "Time of day", y = "Body surface temperature (°C)", color = "Treatment") +
+  theme_ws()
+```
+
+### By Anatomical Region
+
+Ranked by EMM, body surface temperature was highest at the `r region_names[region_order[1]]`, followed by the `r region_names[region_order[2]]`, `r region_names[region_order[3]]` and `r region_names[region_order[4]]` (Table 5). Pairwise comparisons with significance levels are shown in Table 6. This model uses every image (right and left flank as separate regions).
+
+**Table 5.** Body surface temperature (°C) by anatomical region (EMM ± SE). Different letters indicate significant differences (Tukey-adjusted, p < 0.05).
+
+```{r}
+#| code-summary: "Table 5 — body surface temperature by anatomical region"
+
+table5_thermo <- tibble(
+  `Body part` = region_emm$means$Level,
+  `EMM ± SE`  = paste0(round(region_emm$means$Mean, 2), " ± ", round(region_emm$means$SE, 2)),
+  Letters     = cld_thermo_region$Letters[match(region_emm$means$Level, cld_thermo_region$Level)]
+)
+
+table5_thermo %>%
+  kbl(caption = "Table 5. Body surface temperature (°C) by anatomical region.") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE) %>%
+  footnote(general = "Different letters indicate significant differences (Tukey-adjusted, p < 0.05).")
+```
+
+**Table 6.** Pairwise contrasts — body surface temperature by anatomical region (Tukey-adjusted).
+
+```{r}
+#| code-summary: "Table 6 — pairwise contrasts by anatomical region"
+
+region_emm$contrasts %>%
+  kbl(caption = "Table 6. Pairwise contrasts — body surface temperature by anatomical region.") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+```
+
+```{r}
+#| code-summary: "Figure 8 — body surface temperature by region (static)"
+#| fig-cap: "Figure 8. Body surface temperature (°C) by anatomical region across all treatments."
+#| fig-width: 6
+#| fig-height: 4
+#| fig-align: center
+
+ggplot(thermo, aes(x = reorder(body_part, body_temp, median),
+                   y = body_temp, fill = body_part)) +
+  geom_boxplot(alpha = 0.7, outlier.shape = 21) +
+  scale_fill_manual(values = pal_region) +
+  labs(x = "Anatomical region", y = "Body surface temperature (°C)", fill = NULL) +
+  theme_ws() +
+  theme(legend.position = "none")
+```
+
+### Effect of Coat Color
+
+Adjusted for treatment, capture time and period, coat color affected flank temperature in the mixed model (`r coat_mm_f`). EMMs ± SE were `r bt_black` °C for black, `r bt_red` °C for red and `r bt_cream` °C for cream coats (black vs cream: p `r p_black_cream_text`; black vs red: p `r p_black_red_text`; red vs cream: p `r p_red_cream_text`). `r if (coat_animal_var_zero) "The animal variance in this model was estimated as ≈ 0, so its denominator df are set by the images rather than the 16 animals. " else ""`On one mean per animal (n = 16), the coat effect `r if (coat_animal_sig) "remained significant" else "was not significant"` (`r coat_animal_f`; black vs cream: p `r coat_animal_p_bc`; black vs red: p `r coat_animal_p_br`; red vs cream: p `r coat_animal_p_rc`). Coat color is confounded with breed (Table 9): all `r n_braford_red` red animals are Braford and all black and cream animals are Jersey, so coat and breed effects cannot be separated.
+
+**Table 7.** Body surface temperature (°C) by coat color (EMM ± SE). Different letters indicate significant differences (Tukey-adjusted, p < 0.05).
+
+```{r}
+#| code-summary: "Table 7 — body surface temperature by coat color"
+
+cld_coat <- get_cld(model_coat, "coat_color")
+
+table7_thermo <- tibble(
+  `Coat color` = coat_emm$means$Level,
+  `EMM ± SE`   = paste0(round(coat_emm$means$Mean, 2), " ± ", round(coat_emm$means$SE, 2)),
+  Letters      = cld_coat$Letters[match(coat_emm$means$Level, cld_coat$Level)]
+)
+
+table7_thermo %>%
+  kbl(caption = "Table 7. Flank body surface temperature (°C) by coat color (EMM ± SE, adjusted for treatment, capture time and period).") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE) %>%
+  footnote(general = "Different letters indicate significant differences (Tukey-adjusted, p < 0.05). Coat color is confounded with breed (all Red animals are Braford; see Table 9).")
+
+coat_breed_xtab %>%
+  rename(Breed = breed) %>%
+  kbl(caption = "Table 9. Thermographed animals by breed × coat color.") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+```
+
+```{r}
+#| code-summary: "Figure 9 — body surface temperature by coat color (static)"
+#| fig-cap: "Figure 9. Body surface temperature (°C) at the flanks by coat color."
+#| fig-width: 5
+#| fig-height: 4
+#| fig-align: center
+
+ggplot(thermo_flanks, aes(x = coat_color, y = body_temp, fill = coat_color)) +
+  geom_boxplot(alpha = 0.7, outlier.shape = 21) +
+  scale_fill_manual(values = c(
+    "Black" = "#2A2A2A",
+    "Red"   = "#8B3A3A",
+    "Cream" = "#C8A84B"
+  )) +
+  labs(x = "Coat color", y = "Body surface temperature (°C)", fill = NULL) +
+  theme_ws() +
+  theme(legend.position = "none")
+```
+
+### Effect of Breed
+
+Adjusted for treatment, capture time and period, Braford and Jersey cows had flank temperatures of `r bt_braford` °C and `r bt_jersey` °C (EMM ± SE; `r breed_mm_f`). On one mean per animal (n = 16): `r breed_animal_f`.
+
+**Table 8.** Body surface temperature (°C) by breed (EMM ± SE).
+
+```{r}
+#| code-summary: "Table 8 — body surface temperature by breed"
+
+table8_thermo <- tibble(
+  Breed      = breed_emm$means$Level,
+  `EMM ± SE` = paste0(round(breed_emm$means$Mean, 2), " ± ", round(breed_emm$means$SE, 2))
+)
+
+table8_thermo %>%
+  kbl(caption = "Table 8. Flank body surface temperature (°C) by breed (EMM ± SE, adjusted for treatment, capture time and period).") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, background = "#2C4A2E", color = "white", bold = TRUE)
+```
+
+```{r}
+#| code-summary: "Figure 10 — body surface temperature by breed (static)"
+#| fig-cap: "Figure 10. Body surface temperature (°C) at the flanks by breed."
+#| fig-width: 5
+#| fig-height: 4
+#| fig-align: center
+
+ggplot(thermo_flanks, aes(x = breed, y = body_temp, fill = breed)) +
+  geom_boxplot(alpha = 0.7, outlier.shape = 21) +
+  scale_fill_manual(values = c("Braford" = "#C8A84B", "Jersey" = "#4A7FA5")) +
+  labs(x = "Breed", y = "Body surface temperature (°C)", fill = NULL) +
+  theme_ws() +
+  theme(legend.position = "none")
+```
+
+::: {.callout-note}
+**Next:** [Behavior →](results-behavior.qmd) how these different thermal environments shaped grazing, resting, and drinking patterns.
+:::

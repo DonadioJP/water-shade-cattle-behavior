@@ -1,41 +1,43 @@
 project:
   type: website
   output-dir: docs
+  resources:
+    - .nojekyll
 
 website:
-  title: "Water & Shade — Cattle Welfare Study"
+  title: "Water & Shade for Cattle — Experimental Study"
   favicon: assets/favicon.ico
   navbar:
     left:
       - href: index.qmd
         text: Home
-      - href: pages/methods.qmd
+      - href: methods.qmd
         text: Methods
       - text: Results
         menu:
-          - href: pages/results-daytime.qmd
-            text: Daytime Behavior
-          - href: pages/results-nighttime.qmd
-            text: Nighttime Behavior
-          - href: pages/results-drinking.qmd
-            text: Drinking Behavior
-          - href: pages/results-thermal.qmd
+          - href: results-thermal.qmd
             text: Thermal Comfort
-          - href: pages/results-thermography.qmd
-            text: Thermography
-      - href: pages/findings.qmd
+          - href: results-behavior.qmd
+            text: Behavior
+      - href: findings.qmd
         text: Key Findings
       - href: about.qmd
         text: About
+      - href: manuscript/Prettoetal_paper.qmd
+        text: Manuscript
     right:
       - icon: github
-        href: https://github.com/jpdonadio/water-shade-cattle-behavior
+        href: https://github.com/DonadioJP/water-shade-cattle-behavior
   page-footer:
     left: "Pretto et al. - LETA/UFSC"
     right: "Built with [Quarto](https://quarto.org)"
 
 format:
   html:
+    include-in-header:
+      text: |
+        <link rel="stylesheet"
+              href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css">
     theme:
       - cosmo
       - custom.scss

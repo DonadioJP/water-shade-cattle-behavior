@@ -8,18 +8,13 @@ format:
 ```{=html}
 <div class="hero">
   <div class="hero-label">Field Experiment · Florianópolis, Brazil · 2021–2022</div>
-  <h1>Does shade change how cattle graze?</h1>
+  <h1>Does shade and water access change how cattle behave in a challenging thermal environment?</h1>
   <p>
-    In pasture-based systems, shade and water are more than comfort resources —
+    In pasture-based systems, shade and water are more than comfort resources,
     they shape when, where, and how long cattle graze. This study measured the
     behavioral and thermal consequences of restricting both, across two breeds,
     under real field conditions.
   </p>
-  <div class="hero-meta">
-    Pretto · Donadio · Pinheiro Machado Filho &nbsp;|&nbsp;
-    LETA, Federal University of Santa Catarina &nbsp;|&nbsp;
-    <em>Manuscript in preparation</em>
-  </div>
 </div>
 ```
 
@@ -29,7 +24,7 @@ Cattle in tropical and subtropical pasture systems routinely face periods of int
 
 When shade is not available — or when water access is restricted — this trade-off becomes a welfare problem. Animals may reduce voluntary grazing, increase time standing idle, or alter drinking patterns in ways that affect both productivity and wellbeing.
 
-What is less understood is **how the combination of shade and water availability** — not either factor alone — shapes cattle behavior across a full 24-hour cycle. Nocturnal compensatory grazing, drinking dynamics, and body surface temperature responses to restricted resources are rarely studied together.
+What is less understood is **how the combination of shade and water availability shapes cattle behavior and thermal comfort across a full 24-hour cycle**. Nocturnal compensatory grazing, drinking dynamics, and body surface temperature responses to restricted resources are rarely studied together.
 
 This experiment set out to answer that directly.
 
@@ -37,7 +32,7 @@ This experiment set out to answer that directly.
 
 ## The experiment
 
-Thirty-two cows — half Braford, half Jersey — were assigned to four treatment combinations across a 4 × 4 Latin square design, managed under Voisin Rational Grazing in silvopastoral paddocks at the Ressacada Experimental Farm, UFSC.
+Thirty-two cows — 16 Braford and 16 Jersey — were assigned to four treatment combinations across a 4 × 4 Latin square design, managed under Voisin Rational Grazing in silvopastoral paddocks at the Ressacada Experimental Farm, UFSC.
 
 ```{=html}
 <div class="treatment-grid">
@@ -60,7 +55,30 @@ Thirty-two cows — half Braford, half Jersey — were assigned to four treatmen
 </div>
 ```
 
-Behavioral scans were recorded every 10 minutes across full 24-hour cycles. Thermographic images captured body surface temperatures at three time points daily. Black globe thermometers, soil surface measurements, and meteorological station data characterized the thermal environment continuously.
+The experiment was conducted at the **Ressacada Experimental Farm (FER–UFSC)**, Florianópolis, Brazil (27°40'25" S; 48°32'30" W), from December 2021 to April 2022.
+
+This research was conducted under the **Voisin Rational Grazing** system, which structures pasture use around animal welfare and soil recovery.
+
+Shade trees (*Inga edulis*) were established in rows across experimental paddocks, creating a silvopastoral layout that mirrors real-world agroecological farm conditions in southern Brazil.
+
+Animal procedures were approved by the **Ethics Committee on Animal Use (CEUA) of UFSC** under Protocol 857122042.
+
+### Data collection
+
+- Black globe thermometers, soil surface measurements, and meteorological station data characterized the thermal environment continuously.
+- Thermographic images captured body surface temperatures at three time points daily.
+- Behavioral scans were recorded every 10 minutes across full 24-hour cycles.
+- Drinking events were recorded continuously.
+
+```{=html}
+<div class="nav-cards">
+  <a href="methods.qmd" class="nav-card">
+    <span class="icon">🔬️</span>
+    <div class="card-title">Methods</div>
+    <div class="card-desc">Detailed information on the study design, sampling procedures, measurements, and statistical analyses.</div>
+  </a>
+</div>
+```
 
 ------------------------------------------------------------------------
 
@@ -68,31 +86,25 @@ Behavioral scans were recorded every 10 minutes across full 24-hour cycles. Ther
 
 ```{=html}
 <div class="nav-cards">
-  <a href="results-daytime.qmd" class="nav-card">
-    <span class="icon">☀️</span>
-    <div class="card-title">Daytime Behavior</div>
-    <div class="card-desc">Grazing, ruminating, idling — how shade and water alter the daytime activity budget</div>
-  </a>
-  <a href="results-nighttime.qmd" class="nav-card">
-    <span class="icon">🌙</span>
-    <div class="card-title">Nighttime Behavior</div>
-    <div class="card-desc">Compensatory grazing and nocturnal rest patterns across treatments</div>
-  </a>
-  <a href="results-drinking.qmd" class="nav-card">
-    <span class="icon">💧</span>
-    <div class="card-title">Drinking Behavior</div>
-    <div class="card-desc">Drinking time, sip rate, trough visits, and total water intake per treatment</div>
+  <a href="results-behavior.qmd" class="nav-card">
+    <span class="icon">🐄</span>
+    <div class="card-title">Behavior</div>
+    <div class="card-desc">Grazing, ruminating, idling, shade use — how shade and water alter the activity. Drinking time, sip rate, trough visits, and total water intake per treatment.  </div>
   </a>
   <a href="results-thermal.qmd" class="nav-card">
     <span class="icon">🌡️</span>
     <div class="card-title">Thermal Comfort</div>
-    <div class="card-desc">ITGU, WBGT, soil surface temperature, and thermal radiation load in sun vs shade</div>
+    <div class="card-desc">ITGU, WBGT, soil surface temperature, and thermal radiation load in sun vs shade. Body surface temperatures by treatment, breed, and coat color.</div>
   </a>
-  <a href="results-thermography.qmd" class="nav-card">
-    <span class="icon">🔴</span>
-    <div class="card-title">Thermography</div>
-    <div class="card-desc">Body surface temperatures by treatment, breed, coat color, and social rank</div>
-  </a>
+</div>
+```
+
+------------------------------------------------------------------------
+
+## What we found
+
+```{=html}
+<div class="nav-cards">
   <a href="findings.qmd" class="nav-card">
     <span class="icon">📋</span>
     <div class="card-title">Key Findings</div>
@@ -101,14 +113,13 @@ Behavioral scans were recorded every 10 minutes across full 24-hour cycles. Ther
 </div>
 ```
 
-------------------------------------------------------------------------
+```{=html}
+<div class="nav-cards">
+  <a href="manuscript/Prettoetal_paper.qmd" class="nav-card">
+    <span class="icon">📎</span>
+    <div class="card-title">Manuscript</div>
+    <div class="card-desc"> Explore the complete manuscript with the experimental design, analyses, and discussion of the findings.</div>
+  </a>
+</div>
+```
 
-## Study context
-
-This research was conducted under the **Voisin Rational Grazing** system, which structures pasture use around animal welfare and soil recovery. Shade trees (*Inga edulis*) were established in rows across experimental paddocks, creating a silvopastoral layout that mirrors real-world agroecological farm conditions in southern Brazil.
-
-The experiment ran from **December 2021 to April 2022** — the hottest and most humid months of the year in Florianópolis — ensuring ecologically relevant thermal stress conditions throughout.
-
-::: callout-note
-This website accompanies a manuscript currently in preparation for submission to *Applied Animal Behaviour Science*. Data, analysis scripts, and the full methods are available in the [GitHub repository](https://github.com/jpdonadio/water-shade-cattle-behavior).
-:::

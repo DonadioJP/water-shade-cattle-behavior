@@ -2,3 +2,18 @@
 .Rhistory
 .RData
 .Ruserdata
+
+/.quarto/
+**/*.quarto_ipynb
+
+# knitr / Quarto intermediates (the site itself is built into docs/)
+*_cache/
+/*_files/
+/manuscript/*_files/
+/_freeze/
+
+# R session temp files
+.RDataTmp*
+
+# Unpublished manuscript drafts
+/manuscript/*.docx

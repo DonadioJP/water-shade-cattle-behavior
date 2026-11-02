@@ -1,6 +1,5 @@
 ---
 title: "About"
-subtitle: "Research team, study context, and data availability"
 ---
 
 ## Research Team
@@ -10,12 +9,16 @@ MSc candidate, Graduate Program in Agroecosystems
 Federal University of Santa Catarina, Florianópolis, Brazil
 
 **João Pedro Donadio**
-PhD candidate
+PhD student, Lincoln University, Lincoln, New Zealand
 *Corresponding author for this website*
 [jpd.pereira@unesp.br](mailto:jpd.pereira@unesp.br) · [0000-0002-6728-4373](https://orcid.org/0000-0002-6728-4373)
 
+**Sérgio Acuña-Ballesteros**
+PhD student, Graduate Program in Agroecosystems
+Federal University of Santa Catarina, Florianópolis, Brazil
+
 **Luiz Carlos Pinheiro Machado Filho**
-Professor, Department of Zootechny and Rural Development
+Professor, Department of Animal Science and Rural Development
 Laboratory of Applied Ethology and Animal Welfare (LETA)
 Federal University of Santa Catarina, Florianópolis, Brazil
 Corresponding author for the manuscript
@@ -24,29 +27,30 @@ Corresponding author for the manuscript
 
 ## Laboratory
 
-This research was conducted at the **Laboratory of Applied Ethology and Animal Welfare (LETA)**, Department of Zootechny and Rural Development, Federal University of Santa Catarina (UFSC), Florianópolis, Brazil.
+This research was conducted at the **Laboratory of Applied Ethology and Animal Welfare (LETA)**, Department of Animal Science and Rural Development, Federal University of Santa Catarina (UFSC), Florianópolis, Brazil.
 
 LETA has a long-standing research focus on cattle welfare in pasture-based systems, Voisin Rational Grazing, and the behavioral ecology of domestic animals.
 
+Learn more about LETA and follow ongoing research activities:
+```{=html}
+<div class="social-links">
+  <a href="https://leta.paginas.ufsc.br/" target="_blank" class="social-link">
+    <i class="fas fa-globe"></i> Website
+  </a>
+  <a href="https://www.instagram.com/leta_ufsc/" target="_blank" class="social-link">
+    <i class="fab fa-instagram"></i> Instagram
+  </a>
+</div>
+```
+
 ---
 
-## Study Context
-
-The experiment was conducted at the **Ressacada Experimental Farm (FER–UFSC)**, Florianópolis, Brazil (27°40'25" S; 48°32'30" W), from December 2021 to April 2022.
-
-Animal procedures were approved by the **Ethics Committee on Animal Use (CEUA) of UFSC** under Protocol 857122042.
-
-Funding for this research was provided by **CAPES** (Coordination for the Improvement of Higher Education Personnel, Brazil) through a Master's scholarship awarded to F.S. Pretto.
-
----
 
 ## Data and Code
 
 All data, analysis scripts, and the full reproducible workflow are available in the project GitHub repository:
 
-👉 [github.com/jpdonadio/water-shade-cattle-behavior](https://github.com/jpdonadio/water-shade-cattle-behavior)
-
-The manuscript is currently in preparation for submission to *Applied Animal Behaviour Science* (Elsevier).
+[github.com/DonadioJP/water-shade-cattle-behavior](https://github.com/DonadioJP/water-shade-cattle-behavior)
 
 ---
 
@@ -54,4 +58,4 @@ The manuscript is currently in preparation for submission to *Applied Animal Beh
 
 Once published, please cite the original paper. In the meantime, this website may be cited as:
 
-> Pretto, F.S., Donadio, J.P., & Pinheiro Machado Filho, L.C. (*in preparation*). Effect of water and shade access on the behavior and thermal comfort of cattle in a pasture system. *Applied Animal Behaviour Science*.
+> Pretto, F.S., Donadio, J.P., Acuña-Ballesteros, S. & Pinheiro Machado Filho, L.C. (*in preparation*). Effect of water and shade access on the behavior and thermal comfort of cattle in a pasture system. https://jpdonadio.github.io/water-shade-cattle-behavior Accessed *DATE*
